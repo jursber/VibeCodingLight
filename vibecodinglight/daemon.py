@@ -207,7 +207,7 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
 
     if state == "thinking":
         return proto.build_set_multi(
-            proto.CH_OFF, proto.CH_BLINK, proto.CH_OFF,
+            proto.CH_OFF, proto.CH_BREATH, proto.CH_OFF,
             duty_y=dy, blink_period=bp, breath_period=brp,
         )
 
@@ -254,7 +254,7 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
         if state in ("idle",):
             return "red", proto.CH_SOLID, dr
         if state in ("thinking",):
-            return "yellow", proto.CH_BLINK, dy
+            return "yellow", proto.CH_BREATH, dy
         if state in ("model",):
             return "green", proto.CH_BLINK, dg
         if state in ("working",):

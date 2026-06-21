@@ -86,9 +86,9 @@ class TestDaemon:
         f = _mixed_frame("thinking", "working", cfg)
         parsed = proto.parse_frame(f)
         assert parsed is not None
-        # thinking → yellow blink, working → green solid
+        # thinking → yellow breath, working → green solid
         assert parsed[3] == proto.CH_SOLID  # green (working)
-        assert parsed[4] == proto.CH_BLINK  # yellow (thinking)
+        assert parsed[4] == proto.CH_BREATH  # yellow (thinking)
         assert parsed[5] == proto.CH_OFF  # red
 
     def test_mixed_frame_same_channel(self):
