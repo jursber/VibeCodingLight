@@ -238,11 +238,11 @@ def cmd_set_alert() -> None:
 # ── Hook 安装/卸载 ────────────────────────────────────────
 
 def _get_hook_command(script: str, *args: str) -> str:
-    """获取写入 hooks.json 的命令字符串。"""
+    """获取写入 hooks.json 的命令字符串。路径使用正斜杠（兼容 Git Bash）。"""
     if getattr(sys, "frozen", False):
-        parts = [sys.executable, script] + list(args)
+        parts = [sys.executable.replace("\\", "/"), script] + list(args)
     else:
-        python = sys.executable
+        python = sys.executable.replace("\\", "/")
         parts = [python, "-m", "vibecodinglight", script] + list(args)
     return " ".join(f'"{p}"' if " " in p else p for p in parts)
 
