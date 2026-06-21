@@ -7,6 +7,8 @@ VibeCodingLight CLI — vibectl 命令行入口。
   vibectl status         查看状态
   vibectl switch <mode>  切换模式 (claude/codex/mixed)
   vibectl setup          交互式配置
+  vibectl doctor         诊断 hooks、状态账本和硬件连接
+  vibectl sync-runtime   同步 hooks/startup 并重启 daemon
   vibectl install        安装 hooks + 开机自启
   vibectl uninstall      卸载 hooks + 开机自启
   vibectl daemon         作为守护进程运行（内部命令）
@@ -22,6 +24,7 @@ import os
 import subprocess
 import sys
 import shutil
+import time
 
 
 def _print(msg: str = "") -> None:
@@ -115,6 +118,125 @@ def cmd_status() -> None:
             _print("硬件: 未连接")
     except (OSError, json.JSONDecodeError):
         _print("硬件: 未知")
+
+    _print()
+    _print("状态摘要:")
+    _print(_format_state_summary(compact=True))
+
+
+def _iter_state_records() -> list[tuple[str, str, dict]]:
+    from .config import state_dir_for
+
+    records: list[tuple[str, str, dict]] = []
+    for agent in ("claude", "codex"):
+        try:
+            d = state_dir_for(agent)
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith(".tmp") or name.startswith("_"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = f.read().strip()
+                data = json.loads(raw) if raw.startswith("{") else {"state": raw}
+                if isinstance(data, dict):
+                    records.append((agent, name, data))
+            except (OSError, json.JSONDecodeError):
+                continue
+    return records
+
+
+def _format_age(ts) -> str:
+    try:
+        age = max(0.0, time.time() - float(ts))
+    except (TypeError, ValueError):
+        return "未知"
+    if age < 1:
+        return "<1s"
+    if age < 60:
+        return f"{age:.0f}s"
+    return f"{age / 60:.1f}m"
+
+
+def _format_state_summary(compact: bool = False) -> str:
+    records = _iter_state_records()
+    if not records:
+        return "  无活动 session"
+
+    lines: list[str] = []
+    for agent, session_id, data in records:
+        state = data.get("state", "unknown")
+        active_tools = data.get("active_tools") if isinstance(data.get("active_tools"), dict) else {}
+        active_subagents = data.get("active_subagents") if isinstance(data.get("active_subagents"), dict) else {}
+        alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+        line = (
+            f"  {agent}/{session_id}: {state}, "
+            f"age={_format_age(data.get('ts'))}, "
+            f"tools={len(active_tools)}, subagents={len(active_subagents)}, alerts={len(alerts)}"
+        )
+        lines.append(line)
+        if not compact:
+            events = data.get("recent_events") if isinstance(data.get("recent_events"), list) else []
+            for item in events[-5:]:
+                event = item.get("event", "?")
+                event_state = item.get("state", "?")
+                detail = item.get("tool_name") or item.get("agent_id") or ""
+                suffix = f" ({detail})" if detail else ""
+                lines.append(f"    - {event} -> {event_state}{suffix}, age={_format_age(item.get('ts'))}")
+    return "\n".join(lines)
+
+
+def cmd_doctor() -> None:
+    """诊断 hooks、状态账本和硬件连接。"""
+    from .config import CONFIG_PATH, CONN_STATUS_FILE, load_config
+
+    cfg = load_config()
+    _print("=== VibeCodingLight Doctor ===")
+    _print(f"配置: {CONFIG_PATH}")
+    _print(f"模式: {cfg.get('mode', 'mixed')}")
+    _print(f"传输: {cfg.get('transport', 'serial')}")
+    _print(f"端口: {cfg.get('serial_port', 'auto')}")
+    _print()
+
+    for label, path in (("Claude hooks", _claude_settings_path()), ("Codex hooks", _codex_hooks_path())):
+        exists = os.path.isfile(path)
+        _print(f"{label}: {'存在' if exists else '未找到'} ({path})")
+        if exists:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                hooks = raw.get("hooks", {})
+                vibe_events = []
+                for event, groups in hooks.items():
+                    for group in groups if isinstance(groups, list) else []:
+                        for hk in group.get("hooks", []):
+                            cmd = str(hk.get("command", ""))
+                            if "vibecodinglight" in cmd or "vibectl" in cmd:
+                                vibe_events.append(event)
+                _print(f"  Vibe hooks 事件数: {len(set(vibe_events))}")
+                if vibe_events:
+                    _print(f"  事件: {', '.join(sorted(set(vibe_events)))}")
+            except (OSError, json.JSONDecodeError, AttributeError):
+                _print("  无法解析 hooks 配置")
+    _print()
+
+    try:
+        with open(CONN_STATUS_FILE, "r", encoding="utf-8") as f:
+            conn = json.load(f)
+        _print(
+            "硬件: "
+            + ("已连接" if conn.get("connected") else "未连接")
+            + f", transport={conn.get('transport', '')}, port={conn.get('port', '')}, age={_format_age(conn.get('ts'))}"
+        )
+    except (OSError, json.JSONDecodeError):
+        _print("硬件: 未知（尚无连接状态文件）")
+
+    _print()
+    _print("状态账本:")
+    _print(_format_state_summary(compact=False))
 
 
 def cmd_switch() -> None:
@@ -227,6 +349,21 @@ def cmd_install() -> None:
     _print("请重启 Claude Code / Codex 以加载 hooks。")
 
 
+def cmd_sync_runtime() -> None:
+    """同步正在运行的 hooks/startup/daemon 到当前仓库代码。"""
+    from .config import load_config
+
+    cfg = load_config()
+    mode = cfg.get("mode", "mixed")
+    _print("同步运行环境:")
+    _print(f"  模式: {mode}")
+    _install_hooks(mode)
+    _install_autostart()
+    cmd_stop()
+    cmd_start()
+    _print("同步完成。hooks 和开机自启已重写，daemon 已重启。")
+
+
 def cmd_uninstall() -> None:
     """卸载 hooks + 开机自启。"""
     from .config import load_config
@@ -300,10 +437,61 @@ def _codex_hooks_path() -> str:
     return os.path.expanduser("~/.codex/hooks.json")
 
 
+def _is_vibe_hook_command(command: str) -> bool:
+    text = str(command).replace("\\", "/").lower()
+    markers = (
+        "vibecodinglight",
+        "vibectl",
+        "claude_traffic_light",
+        "start_daemon_unified.py",
+        "set_state_unified.py",
+        "set_alert_and_defer.py",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _backup_file(path: str) -> str | None:
+    """写配置前创建时间戳备份；文件不存在时不生成备份。"""
+    if not os.path.isfile(path):
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = f"{path}.bak-{stamp}"
+    suffix = 1
+    while os.path.exists(backup):
+        suffix += 1
+        backup = f"{path}.bak-{stamp}-{suffix}"
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _replace_or_overwrite(tmp: str, path: str) -> None:
+    """Prefer atomic replace; fall back to in-place overwrite on Windows locks."""
+    try:
+        os.replace(tmp, path)
+        return
+    except PermissionError:
+        pass
+
+    with open(tmp, "r", encoding="utf-8") as src:
+        content = src.read()
+    with open(path, "w", encoding="utf-8") as dst:
+        dst.write(content)
+        dst.flush()
+        try:
+            os.fsync(dst.fileno())
+        except OSError:
+            pass
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
+
 def _write_claude_hooks(hooks) -> None:
     """写入 Claude Code hooks 到 settings.json。"""
     path = _claude_settings_path()
     settings = {}
+    existed = os.path.isfile(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             settings = json.load(f)
@@ -335,18 +523,19 @@ def _write_claude_hooks(hooks) -> None:
         settings["hooks"][h.event] = [
             g for g in settings["hooks"][h.event]
             if not (isinstance(g, dict) and
-                    any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
+                    any(_is_vibe_hook_command(str(hk.get("command", "")))
                         for hk in g.get("hooks", [])))
         ]
         settings["hooks"][h.event].append(group)
 
     tmp = path + ".tmp"
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if existed:
+        _backup_file(path)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.flush()
-    os.replace(tmp, path)
+    _replace_or_overwrite(tmp, path)
 
 
 def _remove_claude_hooks() -> None:
@@ -364,8 +553,7 @@ def _remove_claude_hooks() -> None:
         filtered = [
             g for g in original
             if not (isinstance(g, dict) and
-                    any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
+                    any(_is_vibe_hook_command(str(hk.get("command", "")))
                         for hk in g.get("hooks", [])))
         ]
         if len(filtered) != len(original):
@@ -374,16 +562,18 @@ def _remove_claude_hooks() -> None:
 
     if changed:
         tmp = path + ".tmp"
+        _backup_file(path)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
             f.flush()
-        os.replace(tmp, path)
+        _replace_or_overwrite(tmp, path)
 
 
 def _write_codex_hooks(hooks) -> None:
     """写入 Codex hooks 到 hooks.json。"""
     path = _codex_hooks_path()
     config = {}
+    existed = os.path.isfile(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
             config = json.load(f)
@@ -413,18 +603,19 @@ def _write_codex_hooks(hooks) -> None:
         config["hooks"][h.event] = [
             g for g in config["hooks"][h.event]
             if not (isinstance(g, dict) and
-                    any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
+                    any(_is_vibe_hook_command(str(hk.get("command", "")))
                         for hk in g.get("hooks", [])))
         ]
         config["hooks"][h.event].append(group)
 
     tmp = path + ".tmp"
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if existed:
+        _backup_file(path)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
         f.flush()
-    os.replace(tmp, path)
+    _replace_or_overwrite(tmp, path)
 
 
 def _remove_codex_hooks() -> None:
@@ -442,8 +633,7 @@ def _remove_codex_hooks() -> None:
         filtered = [
             g for g in original
             if not (isinstance(g, dict) and
-                    any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
+                    any(_is_vibe_hook_command(str(hk.get("command", "")))
                         for hk in g.get("hooks", [])))
         ]
         if len(filtered) != len(original):
@@ -452,10 +642,11 @@ def _remove_codex_hooks() -> None:
 
     if changed:
         tmp = path + ".tmp"
+        _backup_file(path)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
             f.flush()
-        os.replace(tmp, path)
+        _replace_or_overwrite(tmp, path)
 
 
 # ── 开机自启 ──────────────────────────────────────────────
@@ -476,16 +667,8 @@ def _install_autostart() -> None:
     startup = _startup_folder()
     shortcut_path = os.path.join(startup, "VibeCodingLight.vbs")
 
-    # daemon 启动命令
-    if getattr(sys, "frozen", False):
-        daemon_cmd = f'"{sys.executable}" daemon'
-    else:
-        pythonw = shutil.which("pythonw") or sys.executable
-        daemon_cmd = f'"{pythonw}" -m vibecodinglight daemon'
-
-    # 状态检查命令（用 python 运行 inline 脚本检查 PID）
-    check_python = shutil.which("pythonw") or shutil.which("python") or sys.executable
-    check_python_escaped = check_python.replace('"', '""')
+    # daemon 启动命令。复用 CLI 的 argv，避免 startup 和手动启动使用不同解释器。
+    daemon_cmd = " ".join(f'"{p}"' if " " in p else p for p in _daemon_argv())
     daemon_cmd_escaped = daemon_cmd.replace('"', '""')
 
     # Watchdog VBS：每 30 秒检查一次，daemon 挂了自动重启
@@ -549,8 +732,7 @@ def _daemon_argv() -> list[str]:
     """获取 daemon 启动命令。"""
     if getattr(sys, "frozen", False):
         return [sys.executable, "daemon"]
-    pythonw = shutil.which("pythonw") or sys.executable
-    return [pythonw, "-m", "vibecodinglight", "daemon"]
+    return [sys.executable, "-m", "vibecodinglight", "daemon"]
 
 
 # ── 主入口 ────────────────────────────────────────────────
@@ -561,6 +743,8 @@ _COMMANDS = {
     "status": cmd_status,
     "switch": cmd_switch,
     "setup": cmd_setup,
+    "doctor": cmd_doctor,
+    "sync-runtime": cmd_sync_runtime,
     "install": cmd_install,
     "uninstall": cmd_uninstall,
     "daemon": cmd_daemon,
@@ -580,6 +764,8 @@ def main() -> None:
         _print("  vibectl status         查看状态")
         _print("  vibectl switch <mode>  切换模式 (claude/codex/mixed)")
         _print("  vibectl setup          交互式配置")
+        _print("  vibectl doctor         诊断 hooks、状态账本和硬件连接")
+        _print("  vibectl sync-runtime   同步 hooks/startup 并重启 daemon")
         _print("  vibectl install        安装 hooks + 开机自启")
         _print("  vibectl uninstall      卸载 hooks + 开机自启")
         return

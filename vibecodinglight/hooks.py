@@ -1,9 +1,9 @@
 """
 Hook 脚本 — 被 IDE hook 调用，写入状态文件或启动 daemon。
 
-核心创新：子代理 hooks 智能过滤。
-- Claude Code 子代理的 hook payload 中包含 agent_id 字段（主代理没有）
-- 如果主代理已 Stop（session 状态为 idle），忽略子代理的残留事件
+核心目标：把 hook 事件写成轻量状态账本。
+- 主代理、工具调用、子代理和 alert 分开记录，避免高频 hook 互相覆盖
+- daemon 再从账本推导用户真正需要看的状态
 """
 
 from __future__ import annotations
@@ -18,9 +18,22 @@ from typing import Any
 from .config import PRIORITY, STATES_ROOT, state_dir_for
 
 STDIN_TIMEOUT = 0.2  # 秒
+RECENT_EVENTS_LIMIT = 20
 
 # 需要权限弹窗的工具名
 ALERT_TOOLS = {"AskUserQuestion", "PermissionRequest"}
+TOOL_START_EVENTS = {"PreToolUse"}
+TOOL_END_EVENTS = {"PostToolUse", "PostToolUseFailure", "PostToolBatch"}
+SUBAGENT_START_EVENTS = {"SubagentStart"}
+SUBAGENT_END_EVENTS = {"SubagentStop"}
+ALERT_CLEAR_EVENTS = {"PreToolUse", "PostToolUse", "PostToolBatch", "Stop", "SessionEnd"}
+TURN_BOUNDARY_EVENTS = {"UserPromptSubmit", "Stop", "SessionEnd"}
+SELF_COMMAND_MARKERS = (
+    " -m vibecodinglight ",
+    "\\vibecodinglight\\",
+    "/vibecodinglight/",
+    "vibectl ",
+)
 
 
 def _read_stdin_json() -> dict[str, Any]:
@@ -68,6 +81,21 @@ def _write_state(agent: str, session_id: str, state: str,
     os.replace(tmp, path)
 
 
+def _write_state_record(agent: str, session_id: str, data: dict[str, Any]) -> None:
+    """原子写入完整状态账本。"""
+    d = state_dir_for(agent)
+    path = os.path.join(d, session_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)
+
+
 def _delete_state(agent: str, session_id: str) -> None:
     """删除状态文件（off 状态）。"""
     d = state_dir_for(agent)
@@ -90,6 +118,167 @@ def _read_current_state(agent: str, session_id: str) -> dict | None:
         return None
 
 
+def _tool_event_id(stdin_data: dict[str, Any]) -> tuple[str, bool]:
+    """提取工具调用 ID；平台没有给 ID 时回退到工具名。"""
+    for key in ("tool_use_id", "tool_call_id", "tool_id", "id"):
+        value = str(stdin_data.get(key) or "").strip()
+        if value:
+            return value, True
+    tool_name = str(stdin_data.get("tool_name") or "tool").strip() or "tool"
+    return f"unknown:{tool_name}", False
+
+
+def _subagent_id(stdin_data: dict[str, Any]) -> str:
+    for key in ("agent_id", "subagent_id", "agent_name"):
+        value = str(stdin_data.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown-subagent"
+
+
+def _new_record(state: str, now: float) -> dict[str, Any]:
+    return {
+        "state": state,
+        "ts": now,
+        "main_state": state,
+        "main_ts": now,
+        "active_tools": {},
+        "active_subagents": {},
+        "alerts": {},
+        "recent_events": [],
+    }
+
+
+def _normalize_record(raw: dict[str, Any] | None, state: str, now: float) -> dict[str, Any]:
+    if not raw:
+        return _new_record(state, now)
+    record = dict(raw)
+    current = str(record.get("state") or state)
+    record.setdefault("state", current)
+    record.setdefault("ts", float(record.get("ts") or now))
+    record.setdefault("main_state", current)
+    record.setdefault("main_ts", float(record.get("ts") or now))
+    for key in ("active_tools", "active_subagents", "alerts"):
+        if not isinstance(record.get(key), dict):
+            record[key] = {}
+    if not isinstance(record.get("recent_events"), list):
+        record["recent_events"] = []
+    return record
+
+
+def _effective_state(record: dict[str, Any]) -> str:
+    if record.get("alerts"):
+        return "alert"
+    if record.get("active_tools"):
+        return "model"
+    if record.get("active_subagents"):
+        best = "working"
+        best_p = PRIORITY.get(best, 99)
+        for item in record["active_subagents"].values():
+            state = str(item.get("state") or "working")
+            p = PRIORITY.get(state, 99)
+            if p < best_p:
+                best = state
+                best_p = p
+        return best
+    return str(record.get("main_state") or record.get("state") or "idle")
+
+
+def _append_recent_event(record: dict[str, Any], event: str, state: str,
+                         stdin_data: dict[str, Any], now: float) -> None:
+    item = {
+        "event": event,
+        "state": state,
+        "ts": now,
+    }
+    for key in ("tool_name", "tool_use_id", "tool_call_id", "agent_id"):
+        value = stdin_data.get(key)
+        if value:
+            item[key] = value
+    events = list(record.get("recent_events") or [])
+    events.append(item)
+    record["recent_events"] = events[-RECENT_EVENTS_LIMIT:]
+
+
+def _apply_event_state(agent: str, session_id: str, event: str, state: str,
+                       stdin_data: dict[str, Any] | None = None) -> None:
+    """把一个 hook 事件合并进 session 状态账本。"""
+    stdin_data = stdin_data or {}
+    now = time.time()
+    record = _normalize_record(_read_current_state(agent, session_id), state, now)
+
+    if event in TOOL_END_EVENTS and record.get("updated_by") in ("Stop", "SessionEnd"):
+        _append_recent_event(record, event, str(record.get("state") or "idle"), stdin_data, now)
+        _write_state_record(agent, session_id, record)
+        return
+
+    if event in TURN_BOUNDARY_EVENTS:
+        record["active_tools"] = {}
+        record["active_subagents"] = {}
+
+    if event in ALERT_CLEAR_EVENTS:
+        record["alerts"] = {}
+
+    if event in TOOL_START_EVENTS:
+        tool_id, has_stable_id = _tool_event_id(stdin_data)
+        existing = record["active_tools"].get(tool_id, {})
+        count = int(existing.get("count", 0)) + 1 if not has_stable_id else 1
+        record["active_tools"][tool_id] = {
+            "state": "model",
+            "ts": now,
+            "tool_name": stdin_data.get("tool_name", ""),
+            "count": count,
+            "stable_id": has_stable_id,
+        }
+    elif event in TOOL_END_EVENTS:
+        tool_id, has_stable_id = _tool_event_id(stdin_data)
+        existing = record["active_tools"].get(tool_id)
+        if existing and not has_stable_id:
+            count = max(0, int(existing.get("count", 1)) - 1)
+            if count:
+                existing["count"] = count
+                existing["ts"] = now
+                record["active_tools"][tool_id] = existing
+            else:
+                record["active_tools"].pop(tool_id, None)
+        else:
+            record["active_tools"].pop(tool_id, None)
+        if event == "PostToolUseFailure":
+            record["alerts"]["tool_failure"] = {"state": "alert", "ts": now}
+        elif not record["active_tools"]:
+            record["main_state"] = state
+            record["main_ts"] = now
+
+    if event in SUBAGENT_START_EVENTS:
+        sub_id = _subagent_id(stdin_data)
+        record["active_subagents"][sub_id] = {
+            "state": state,
+            "ts": now,
+        }
+    elif event in SUBAGENT_END_EVENTS:
+        sub_id = _subagent_id(stdin_data)
+        record["active_subagents"].pop(sub_id, None)
+
+    if state == "alert" and event not in TOOL_END_EVENTS:
+        record["alerts"][event or "alert"] = {"state": "alert", "ts": now}
+
+    if (
+        event in ("UserPromptSubmit", "Stop", "PreCompact", "PostCompact")
+        or event in SUBAGENT_END_EVENTS
+        or not stdin_data.get("agent_id")
+    ):
+        if event not in TOOL_START_EVENTS and event not in TOOL_END_EVENTS:
+            record["main_state"] = state
+            record["main_ts"] = now
+
+    record["state"] = _effective_state(record)
+    record["ts"] = now
+    record["updated_by"] = event
+    record["is_subagent"] = bool(stdin_data.get("agent_id"))
+    _append_recent_event(record, event, record["state"], stdin_data, now)
+    _write_state_record(agent, session_id, record)
+
+
 def _resolve_state(event: str, state_hint: str | None,
                    stdin_data: dict[str, Any]) -> str | None:
     """根据事件和 stdin 数据确定最终状态。
@@ -99,6 +288,13 @@ def _resolve_state(event: str, state_hint: str | None,
     - 其他: 直接使用 state_hint
     """
     if state_hint is None:
+        return None
+
+    command_text = " ".join(
+        str(stdin_data.get(key) or "")
+        for key in ("command", "cmd", "input", "tool_input")
+    ).lower().replace("\\", "/")
+    if any(marker.replace("\\", "/") in command_text for marker in SELF_COMMAND_MARKERS):
         return None
 
     if state_hint == "auto":
@@ -150,14 +346,6 @@ def main_set_state() -> None:
     session_id = (stdin_data.get("session_id") or
                   stdin_data.get("conversation_id") or "").strip()
 
-    # 子代理过滤：agent_id 存在表示这是子代理触发的 hook，一律忽略。
-    # 子代理的工具调用/生命周期对用户来说是后台噪音，不应影响灯效。
-    # 只有主代理的 hook（没有 agent_id）才写入状态。
-    agent_id = stdin_data.get("agent_id")
-    is_subagent = bool(agent_id)
-    if is_subagent:
-        sys.exit(0)
-
     # 确定最终状态
     state = _resolve_state(event, state_hint, stdin_data)
     if state is None:
@@ -183,7 +371,7 @@ def main_set_state() -> None:
     if state == "off":
         _delete_state(agent, session_id)
     else:
-        _write_state(agent, session_id, state, is_subagent=is_subagent)
+        _apply_event_state(agent, session_id, event, state, stdin_data)
 
 
 def main_start_daemon() -> None:
@@ -230,14 +418,8 @@ def main_set_alert() -> None:
     session_id = (stdin_data.get("session_id") or
                   stdin_data.get("conversation_id") or "").strip()
 
-    # 子代理过滤：同 set-state，忽略所有子代理 hook
-    agent_id = stdin_data.get("agent_id")
-    is_subagent = bool(agent_id)
-    if is_subagent:
-        sys.exit(0)
-
     if session_id and os.sep not in session_id and "/" not in session_id:
-        _write_state(agent, session_id, "alert", is_subagent=is_subagent)
+        _apply_event_state(agent, session_id, "PermissionRequest", "alert", stdin_data)
 
     # 输出 defer 决策
     print(json.dumps({"hookSpecificOutput": {"permissionDecision": "defer"}}))
@@ -249,14 +431,5 @@ def _get_daemon_argv() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "daemon"]
 
-    # 开发模式：优先 pythonw，回退 python
-    import shutil
-    python = sys.executable
-    pythonw = shutil.which("pythonw") or python
-    # 查找 vibectl 命令
-    vibectl = shutil.which("vibectl")
-    if vibectl:
-        return [pythonw, vibectl, "daemon"]
-
-    # 回退：python -m vibecodinglight daemon
-    return [pythonw, "-m", "vibecodinglight", "daemon"]
+    # 开发模式：使用当前解释器，避免 pythonw/vibectl 包装器绕到另一个 Python。
+    return [sys.executable, "-m", "vibecodinglight", "daemon"]

@@ -1,11 +1,20 @@
 """核心功能测试。"""
 
+import json
+import os
 import time
 import pytest
 from vibecodinglight import protocol as proto
-from vibecodinglight.daemon import _pick_highest, _mixed_frame, _state_to_frame
-from vibecodinglight.hooks import _resolve_state
+from vibecodinglight.daemon import (
+    _pick_highest,
+    _mixed_frame,
+    _state_to_frame,
+    _frame_for_states,
+    _record_to_state,
+)
+from vibecodinglight.hooks import _apply_event_state, _read_current_state, _resolve_state
 from vibecodinglight.config import PRIORITY, load_config, _validate_config
+from vibecodinglight.hooks_catalog import HookEntry
 
 
 class TestProtocol:
@@ -136,6 +145,76 @@ class TestDaemon:
         # Both map to red; alert has higher priority
         assert parsed[5] == proto.CH_BLINK  # red (alert wins)
 
+    def test_frame_for_states_mixed_preserves_two_agents(self):
+        cfg = load_config()
+        now = time.time()
+        frame, label, active = _frame_for_states(
+            "mixed",
+            {"claude-session": {"state": "thinking", "ts": now}},
+            {"codex-session": {"state": "working", "ts": now}},
+            cfg,
+        )
+
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[3] == proto.CH_SOLID    # Codex working -> green solid
+        assert parsed[4] == proto.CH_BREATH   # Claude thinking -> yellow breath
+        assert parsed[5] == proto.CH_OFF
+        assert label == "claude:thinking,codex:working"
+        assert active is True
+
+    def test_record_to_state_parallel_tools_stays_model_until_all_finish(self):
+        now = time.time()
+        record = {
+            "state": "working",
+            "ts": now,
+            "active_tools": {
+                "tool-a": {"state": "model", "ts": now - 1, "tool_name": "Bash"},
+                "tool-b": {"state": "model", "ts": now, "tool_name": "Edit"},
+            },
+        }
+
+        assert _record_to_state(record, now=now)["state"] == "model"
+
+        del record["active_tools"]["tool-a"]
+        assert _record_to_state(record, now=now)["state"] == "model"
+
+        del record["active_tools"]["tool-b"]
+        assert _record_to_state(record, now=now)["state"] == "working"
+
+    def test_record_to_state_stale_active_beats_idle_without_lying(self):
+        now = time.time()
+        record = {
+            "state": "model",
+            "ts": now - 60,
+            "active_tools": {
+                "tool-a": {"state": "model", "ts": now - 60, "tool_name": "Bash"},
+            },
+        }
+
+        assert _record_to_state(record, now=now)["state"] == "stale"
+
+    def test_record_to_state_expires_stale_fallback_tool_counts(self):
+        now = time.time()
+        record = {
+            "state": "model",
+            "ts": now - 600,
+            "main_state": "working",
+            "main_ts": now - 600,
+            "active_tools": {
+                "unknown:Bash": {
+                    "state": "model",
+                    "ts": now - 600,
+                    "tool_name": "Bash",
+                    "count": 6,
+                    "stable_id": False,
+                },
+            },
+        }
+
+        assert _record_to_state(record, now=now)["state"] == "idle"
+
 
 class TestHooks:
     def test_resolve_auto_bash(self):
@@ -159,6 +238,191 @@ class TestHooks:
 
     def test_resolve_none(self):
         assert _resolve_state("SessionStart", None, {}) is None
+
+    def test_apply_event_state_tracks_parallel_tools(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "claude",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+        _apply_event_state(
+            "claude",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-b", "tool_name": "Edit"},
+        )
+        _apply_event_state(
+            "claude",
+            "session-1",
+            "PostToolUse",
+            "working",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+
+        data = _read_current_state("claude", "session-1")
+
+        assert data["state"] == "model"
+        assert set(data["active_tools"]) == {"tool-b"}
+
+    def test_apply_event_state_counts_tools_without_ids(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state("codex", "session-1", "PreToolUse", "model", {"tool_name": "Bash"})
+        _apply_event_state("codex", "session-1", "PreToolUse", "model", {"tool_name": "Bash"})
+        _apply_event_state("codex", "session-1", "PostToolUse", "working", {"tool_name": "Bash"})
+
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "model"
+        assert data["active_tools"]["unknown:Bash"]["count"] == 1
+
+        _apply_event_state("codex", "session-1", "PostToolUse", "working", {"tool_name": "Bash"})
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "working"
+        assert data["active_tools"] == {}
+
+    def test_apply_event_state_tracks_subagent_lifecycle(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "SubagentStart",
+            "thinking",
+            {"agent_id": "sub-1"},
+        )
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "thinking"
+        assert set(data["active_subagents"]) == {"sub-1"}
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "SubagentStop",
+            "working",
+            {"agent_id": "sub-1"},
+        )
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "working"
+        assert data["active_subagents"] == {}
+
+    def test_apply_event_state_clears_permission_alert_after_tool_starts(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state("claude", "session-1", "PermissionRequest", "alert", {})
+        assert _read_current_state("claude", "session-1")["state"] == "alert"
+
+        _apply_event_state(
+            "claude",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+        data = _read_current_state("claude", "session-1")
+
+        assert data["state"] == "model"
+        assert data["alerts"] == {}
+
+    def test_apply_event_state_stop_clears_active_work(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "SubagentStart",
+            "thinking",
+            {"agent_id": "sub-1"},
+        )
+
+        _apply_event_state("codex", "session-1", "Stop", "idle", {})
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "idle"
+        assert data["active_tools"] == {}
+        assert data["active_subagents"] == {}
+
+    def test_apply_event_state_new_prompt_clears_previous_turn_residue(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+
+        _apply_event_state("codex", "session-1", "UserPromptSubmit", "thinking", {"prompt": "next"})
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "thinking"
+        assert data["active_tools"] == {}
+
+    def test_apply_event_state_ignores_late_post_tool_after_stop(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "PreToolUse",
+            "model",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+        _apply_event_state("codex", "session-1", "Stop", "idle", {})
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "PostToolUse",
+            "working",
+            {"tool_use_id": "tool-a", "tool_name": "Bash"},
+        )
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "idle"
+        assert data["active_tools"] == {}
+
+    def test_resolve_state_ignores_vibecodinglight_self_commands(self):
+        assert _resolve_state(
+            "PreToolUse",
+            "auto",
+            {
+                "tool_name": "Bash",
+                "command": (
+                    "C:/Users/Administrator/AppData/Local/hermes/hermes-agent/venv/"
+                    "Scripts/python.exe -m vibecodinglight status"
+                ),
+            },
+        ) is None
 
 
 class TestPriority:
@@ -214,3 +478,130 @@ class TestConfigValidation:
         cfg = {"serial_port": ""}
         result = _validate_config(cfg)
         assert result["serial_port"] == "auto"
+
+
+class TestCliSafety:
+    def test_write_claude_hooks_creates_backup_before_rewrite(self, tmp_path, monkeypatch):
+        from vibecodinglight import cli
+
+        settings_path = tmp_path / "settings.json"
+        original = {"hooks": {"Stop": [{"matcher": "", "hooks": []}]}, "keep": True}
+        settings_path.write_text(json.dumps(original), encoding="utf-8")
+
+        monkeypatch.setattr(cli, "_claude_settings_path", lambda: str(settings_path))
+
+        cli._write_claude_hooks((HookEntry("Stop", True, "idle"),))
+
+        backups = list(tmp_path.glob("settings.json.bak-*"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+
+    def test_write_claude_hooks_falls_back_when_replace_is_denied(self, tmp_path, monkeypatch):
+        from vibecodinglight import cli
+
+        settings_path = tmp_path / "settings.json"
+        original = {"hooks": {}, "keep": True}
+        settings_path.write_text(json.dumps(original), encoding="utf-8")
+
+        monkeypatch.setattr(cli, "_claude_settings_path", lambda: str(settings_path))
+
+        real_replace = os.replace
+
+        def deny_replace(src, dst):
+            if str(dst) == str(settings_path):
+                raise PermissionError("locked by reader")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", deny_replace)
+
+        cli._write_claude_hooks((HookEntry("Stop", True, "idle"),))
+
+        updated = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert updated["keep"] is True
+        assert updated["hooks"]["Stop"]
+
+        backups = list(tmp_path.glob("settings.json.bak-*"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text(encoding="utf-8")) == original
+
+    def test_doctor_command_registered(self):
+        from vibecodinglight import cli
+
+        assert "doctor" in cli._COMMANDS
+
+    def test_sync_runtime_command_registered(self):
+        from vibecodinglight import cli
+
+        assert "sync-runtime" in cli._COMMANDS
+
+    def test_legacy_traffic_light_hook_commands_are_treated_as_vibe_hooks(self):
+        from vibecodinglight import cli
+
+        assert cli._is_vibe_hook_command(
+            "E:/Cursor/claude_traffic_light/.venv/Scripts/python.exe "
+            "E:/Cursor/claude_traffic_light/set_state_unified.py auto"
+        )
+        assert cli._is_vibe_hook_command(
+            "E:/Cursor/claude_traffic_light/.venv/Scripts/python.exe "
+            "E:/Cursor/claude_traffic_light/start_daemon_unified.py"
+        )
+
+    def test_hook_daemon_argv_does_not_use_vibectl_wrapper(self, monkeypatch):
+        from vibecodinglight import hooks
+
+        monkeypatch.setattr("shutil.which", lambda name: "C:/fake/vibectl.exe" if name == "vibectl" else None)
+        argv = hooks._get_daemon_argv()
+
+        assert "vibectl" not in " ".join(argv).lower()
+        assert argv[-3:] == ["-m", "vibecodinglight", "daemon"]
+
+
+class TestTransport:
+    def test_wait_for_serial_uses_explicit_configured_port(self, monkeypatch):
+        from vibecodinglight import transport
+
+        opened = []
+
+        class FakeSerial:
+            is_open = True
+
+        def fake_open_serial(port):
+            opened.append(port)
+            return FakeSerial()
+
+        monkeypatch.setattr(transport, "open_serial", fake_open_serial)
+
+        link = transport.wait_for_serial(0, {"serial_port": "COM9"})
+
+        assert link.is_connected is True
+        assert opened == ["COM9"]
+
+    def test_wait_for_serial_auto_scans_detected_port(self, monkeypatch):
+        from vibecodinglight import transport
+
+        opened = []
+
+        class FakeSerial:
+            is_open = True
+
+        monkeypatch.setattr(transport, "find_esp32_port", lambda: "COM7")
+        monkeypatch.setattr(transport, "open_serial", lambda port: opened.append(port) or FakeSerial())
+
+        link = transport.wait_for_serial(0, {"serial_port": "auto"})
+
+        assert link.is_connected is True
+        assert opened == ["COM7"]
+
+    def test_serial_link_health_check_detects_closed_serial(self):
+        from vibecodinglight.transport import SerialLink
+
+        class FakeSerial:
+            is_open = False
+
+            @property
+            def in_waiting(self):
+                return 0
+
+        link = SerialLink(FakeSerial())
+
+        assert link.health_check() is False

@@ -28,6 +28,7 @@ PRIORITY = {
     "thinking": 2,   # 模型思考中
     "model":    3,   # 调用工具/等待 LLM
     "working":  4,   # 正在工作
+    "stale":    4.5, # 状态仍可能活跃，但 hook 已长时间未刷新
     "idle":     5,   # 等待用户输入
     "off":      6,   # 会话结束
 }

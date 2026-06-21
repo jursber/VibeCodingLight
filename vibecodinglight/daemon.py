@@ -46,8 +46,10 @@ MIN_ACTIVE_HOLD_S = 0.5       # 最短显示时间
 INACTIVITY_TIMEOUT_S = 1800   # 30 分钟无活动自动熄灯
 ALERT_STALE_S = 5.0           # alert 超过此秒数后，如果有更新的非 alert 状态则降级
 ACTIVE_STATE_STALE_S = 30     # 活跃状态文件 mtime 超过此秒数未更新，自动降级为 idle
-ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working"}
+ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
 CONN_STATUS_TTL = 6.0
+DERIVED_ACTIVE_STALE_S = 45.0
+FALLBACK_TOOL_EXPIRE_S = 300.0
 
 
 # ── 连接状态文件 ──────────────────────────────────────────
@@ -132,9 +134,10 @@ def _read_states(agent: str) -> dict[str, dict]:
                 raw = f.read().strip()
             if raw.startswith("{"):
                 data = json.loads(raw)
-                state = data.get("state", "")
-                ts = data.get("ts", 0)
-                is_sub = data.get("is_subagent", False)
+                derived = _record_to_state(data, now=now)
+                state = derived.get("state", "")
+                ts = derived.get("ts", data.get("ts", 0))
+                is_sub = derived.get("is_subagent", data.get("is_subagent", False))
             else:
                 state = raw
                 ts = os.path.getmtime(path)
@@ -153,23 +156,14 @@ def _read_states(agent: str) -> dict[str, dict]:
                 except OSError:
                     pass
 
-            # 活动态新鲜度检测（基于文件 mtime，30 秒无更新则降级）
-            # 解决 Ctrl+C 取消任务后状态文件不更新、灯一直绿的问题
+            # 活动态新鲜度检测：不直接假装 idle，先进入 stale。
             if state in ACTIVE_STATES:
                 try:
                     file_mtime = os.path.getmtime(path)
                     if now - file_mtime > ACTIVE_STATE_STALE_S:
-                        log.info("Session %s/%s state %s stale (mtime %.1fs ago), → idle",
+                        log.info("Session %s/%s state %s stale (mtime %.1fs ago), → stale",
                                  agent, name, state, now - file_mtime)
-                        state = "idle"
-                        ts = now
-                        try:
-                            tmp = path + ".tmp"
-                            with open(tmp, "w") as f:
-                                json.dump({"state": "idle", "ts": ts}, f)
-                            os.replace(tmp, path)
-                        except OSError:
-                            pass
+                        state = "stale"
                 except OSError:
                     pass
 
@@ -181,12 +175,54 @@ def _read_states(agent: str) -> dict[str, dict]:
                     pass
                 continue
 
-            if state in PRIORITY:
+            if state in PRIORITY or state == "stale":
                 states[name] = {"state": state, "is_subagent": is_sub, "ts": ts}
         except (OSError, json.JSONDecodeError):
             continue
 
     return states
+
+
+def _newest_ts(entries: dict[str, dict]) -> float:
+    newest = 0.0
+    for item in entries.values():
+        try:
+            newest = max(newest, float(item.get("ts", 0)))
+        except (TypeError, ValueError):
+            pass
+    return newest
+
+
+def _record_to_state(record: dict, now: float | None = None) -> dict:
+    """从状态账本推导当前可显示状态。"""
+    now = time.time() if now is None else now
+    active_tools = record.get("active_tools") if isinstance(record.get("active_tools"), dict) else {}
+    active_subagents = record.get("active_subagents") if isinstance(record.get("active_subagents"), dict) else {}
+    alerts = record.get("alerts") if isinstance(record.get("alerts"), dict) else {}
+    ts = float(record.get("ts") or 0)
+    main_state = str(record.get("main_state") or record.get("state") or "idle")
+    main_ts = float(record.get("main_ts") or ts or now)
+    is_sub = bool(record.get("is_subagent", False))
+
+    if alerts:
+        return {"state": "alert", "ts": _newest_ts(alerts) or ts or now, "is_subagent": is_sub}
+
+    if active_tools:
+        latest = _newest_ts(active_tools) or ts or now
+        has_stable_tool = any(bool(item.get("stable_id", True)) for item in active_tools.values())
+        if not has_stable_tool and now - latest > FALLBACK_TOOL_EXPIRE_S:
+            return {"state": "idle", "ts": now, "is_subagent": is_sub}
+        if now - latest > DERIVED_ACTIVE_STALE_S:
+            return {"state": "stale", "ts": latest, "is_subagent": is_sub}
+        return {"state": "model", "ts": latest, "is_subagent": is_sub}
+
+    if active_subagents:
+        latest = _newest_ts(active_subagents) or ts or now
+        if now - latest > DERIVED_ACTIVE_STALE_S:
+            return {"state": "stale", "ts": latest, "is_subagent": True}
+        return {"state": "working", "ts": latest, "is_subagent": True}
+
+    return {"state": main_state, "ts": main_ts, "is_subagent": is_sub}
 
 
 def _pick_highest(states: dict[str, dict]) -> str:
@@ -210,7 +246,7 @@ def _pick_highest(states: dict[str, dict]) -> str:
     for entry in states.values():
         s = entry.get("state", "off")
         ts = entry.get("ts", 0)
-        p = PRIORITY.get(s, 99)
+        p = PRIORITY.get(s, 4.5 if s == "stale" else 99)
         if s == "alert":
             has_alert = True
             if ts > newest_alert_ts:
@@ -275,6 +311,12 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
             duty_g=dg, blink_period=bp, breath_period=brp,
         )
 
+    if state == "stale":
+        return proto.build_set_multi(
+            proto.CH_BLINK, proto.CH_OFF, proto.CH_OFF,
+            duty_g=dg, blink_period=max(bp, 1200), breath_period=brp,
+        )
+
     # 默认：红灯常亮（idle）
     return proto.build_set_multi(
         proto.CH_OFF, proto.CH_OFF, proto.CH_SOLID,
@@ -311,6 +353,8 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
             return "green", proto.CH_BREATH, dg
         if state in ("working",):
             return "green", proto.CH_SOLID, dg
+        if state in ("stale",):
+            return "green", proto.CH_BLINK, dg
         return "off", proto.CH_OFF, 0
 
     c_ch, c_mode, c_duty = _channel_map(claude_state)
@@ -336,8 +380,8 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
             dutys[idx] = x_duty
         else:
             # 通道冲突：选高优先级
-            c_p = PRIORITY.get(claude_state, 99)
-            x_p = PRIORITY.get(codex_state, 99)
+            c_p = PRIORITY.get(claude_state, 4.5 if claude_state == "stale" else 99)
+            x_p = PRIORITY.get(codex_state, 4.5 if codex_state == "stale" else 99)
             if x_p < c_p:
                 modes[idx] = x_mode
                 dutys[idx] = x_duty
@@ -354,6 +398,20 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
     )
 
 
+def _frame_for_states(mode: str, claude_states: dict[str, dict],
+                      codex_states: dict[str, dict], cfg: dict) -> tuple[bytes, str, bool]:
+    """根据模式和状态集合生成硬件帧、日志标签和是否有活动 session。"""
+    if mode == "mixed":
+        claude_state = _pick_highest(claude_states)
+        codex_state = _pick_highest(codex_states)
+        label = f"claude:{claude_state},codex:{codex_state}"
+        return _mixed_frame(claude_state, codex_state, cfg), label, bool(claude_states or codex_states)
+
+    states = codex_states if mode == "codex" else claude_states
+    best_state = _pick_highest(states)
+    return _state_to_frame(best_state, cfg), best_state, bool(states)
+
+
 # ── 单实例保障 ────────────────────────────────────────────
 def _acquire_lock():
     try:
@@ -361,6 +419,8 @@ def _acquire_lock():
     except OSError:
         return None
     try:
+        os.write(fd, b"1")
+        os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         return fd
     except (IOError, OSError):
@@ -394,6 +454,9 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
         try:
             now = time.time()
 
+            if hasattr(link, "health_check") and not link.health_check():
+                raise ConnectionError("硬件连接断开: health_check failed")
+
             # 配置热重载
             try:
                 m = os.path.getmtime(cfg_path)
@@ -406,24 +469,14 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
             except OSError:
                 pass
 
-            # 读取状态（任意时刻只显示一个灯，取所有终端中优先级最高的）
-            if mode == "mixed":
-                claude_states = _read_states("claude")
-                codex_states = _read_states("codex")
-                all_states = {}
-                all_states.update(claude_states)
-                all_states.update(codex_states)
-                best_state = _pick_highest(all_states)
-                has_active_sessions = bool(all_states)
-            else:
-                states = _read_states(mode)
-                best_state = _pick_highest(states)
-                has_active_sessions = bool(states)
-
-            frame = _state_to_frame(best_state, cfg)
+            claude_states = _read_states("claude") if mode in ("claude", "mixed") else {}
+            codex_states = _read_states("codex") if mode in ("codex", "mixed") else {}
+            frame, best_state, has_active_sessions = _frame_for_states(
+                mode, claude_states, codex_states, cfg
+            )
 
             # 有非 off/idle 的活动状态时更新最后活动时间
-            if has_active_sessions and best_state not in ("off", "idle"):
+            if has_active_sessions and "off" not in best_state and "idle" not in best_state:
                 last_activity = now
 
             # 30 分钟无活动 → 熄灯
@@ -435,7 +488,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
             if (
                 last_state in ACTIVE_HOLD_STATES
                 and (now - last_switch) < MIN_ACTIVE_HOLD_S
-                and PRIORITY.get(best_state, 99) >= PRIORITY.get(last_state, 99)
+                and PRIORITY.get(best_state, 4.5 if best_state == "stale" else 99) >= PRIORITY.get(last_state, 4.5 if last_state == "stale" else 99)
                 and best_state != last_state
             ):
                 time.sleep(POLL_INTERVAL)
@@ -550,8 +603,9 @@ def main() -> None:
             _write_conn_status(False, transport)
 
             from .transport import wait_for_transport, find_esp32_port
-            link = wait_for_transport(transport, RECONNECT_INTERVAL)
-            port = find_esp32_port() if transport == "serial" else ""
+            link = wait_for_transport(transport, RECONNECT_INTERVAL, cfg)
+            configured_port = str(cfg.get("serial_port") or "auto")
+            port = configured_port if configured_port.lower() != "auto" else find_esp32_port()
             _write_conn_status(True, transport, port or "")
             log.info("硬件已连接 (transport=%s)", transport)
 

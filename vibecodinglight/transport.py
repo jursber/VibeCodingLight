@@ -53,6 +53,17 @@ class SerialLink:
     def is_connected(self) -> bool:
         return bool(getattr(self._ser, "is_open", False))
 
+    def health_check(self) -> bool:
+        """轻量检查串口是否仍可用。"""
+        try:
+            if not getattr(self._ser, "is_open", False):
+                return False
+            # 读取 in_waiting 会触发 pyserial 查询底层句柄；USB 拔出时常在这里报错。
+            getattr(self._ser, "in_waiting", 0)
+            return True
+        except (serial.SerialException, OSError):
+            return False
+
     def send_raw(self, data: bytes, wait: bool = True, timeout: float = 5.0) -> bool:
         try:
             self._ser.write(data)
@@ -247,10 +258,12 @@ class BleLink:
             self._thread.join(timeout=5.0)
 
 
-def wait_for_serial(reconnect_interval: float) -> SerialLink:
+def wait_for_serial(reconnect_interval: float, cfg: dict | None = None) -> SerialLink:
     """阻塞直到 USB 串口可用。"""
+    cfg = cfg or {}
     while True:
-        port = find_esp32_port()
+        configured = str(cfg.get("serial_port") or "auto").strip()
+        port = configured if configured and configured.lower() != "auto" else find_esp32_port()
         if port:
             try:
                 return SerialLink(open_serial(port))
@@ -259,7 +272,7 @@ def wait_for_serial(reconnect_interval: float) -> SerialLink:
         time.sleep(reconnect_interval)
 
 
-def wait_for_transport(mode: str, reconnect_interval: float):
+def wait_for_transport(mode: str, reconnect_interval: float, cfg: dict | None = None):
     """阻塞直到有可用的传输对象。"""
     if mode == "ble":
         link = BleLink()
@@ -269,4 +282,4 @@ def wait_for_transport(mode: str, reconnect_interval: float):
                 log.info("等待 BLE: %s", link._last_error)
             time.sleep(1.0)
         return link
-    return wait_for_serial(reconnect_interval)
+    return wait_for_serial(reconnect_interval, cfg)
