@@ -58,7 +58,7 @@ def cmd_start() -> None:
 def cmd_stop() -> None:
     """停止守护进程。"""
     from .proc import pid_alive
-    from .config import PID_FILE
+    from .config import PID_FILE, LOCK_FILE
 
     try:
         with open(PID_FILE, "r", encoding="utf-8") as f:
@@ -77,10 +77,9 @@ def cmd_stop() -> None:
         _print("守护进程未运行")
 
     # 清理 PID 和锁文件
-    for f in [PID_FILE,
-              os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp", "vibe_daemon.lock")]:
+    for path in [PID_FILE, LOCK_FILE]:
         try:
-            os.remove(f)
+            os.remove(path)
         except OSError:
             pass
 
@@ -135,8 +134,8 @@ def cmd_switch() -> None:
     cfg["mode"] = mode
     save_config(cfg)
 
-    # 安装/卸载 hooks
-    _uninstall_hooks(old_mode)
+    # 先卸载所有模式的 hooks（避免残留），再安装新模式
+    _uninstall_hooks("mixed")
     _install_hooks(mode)
 
     _print(f"已切换: {old_mode} → {mode}")
@@ -310,7 +309,7 @@ def _write_claude_hooks(hooks) -> None:
             g for g in settings["hooks"][h.event]
             if not (isinstance(g, dict) and
                     any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibe" in str(hk.get("command", "")).lower()
+                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
                         for hk in g.get("hooks", [])))
         ]
         settings["hooks"][h.event].append(group)
@@ -339,7 +338,7 @@ def _remove_claude_hooks() -> None:
             g for g in original
             if not (isinstance(g, dict) and
                     any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibe" in str(hk.get("command", "")).lower()
+                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
                         for hk in g.get("hooks", [])))
         ]
         if len(filtered) != len(original):
@@ -388,7 +387,7 @@ def _write_codex_hooks(hooks) -> None:
             g for g in config["hooks"][h.event]
             if not (isinstance(g, dict) and
                     any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibe" in str(hk.get("command", "")).lower()
+                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
                         for hk in g.get("hooks", [])))
         ]
         config["hooks"][h.event].append(group)
@@ -417,7 +416,7 @@ def _remove_codex_hooks() -> None:
             g for g in original
             if not (isinstance(g, dict) and
                     any("vibecodinglight" in str(hk.get("command", "")) or
-                        "vibe" in str(hk.get("command", "")).lower()
+                        "vibecodinglight" in str(hk.get("command", "")) or "vibectl" in str(hk.get("command", ""))
                         for hk in g.get("hooks", [])))
         ]
         if len(filtered) != len(original):
@@ -458,7 +457,9 @@ def _install_autostart() -> None:
         pythonw = shutil.which("pythonw") or exe
         cmd = f'"{pythonw}" -m vibecodinglight daemon'
 
-    vbs = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd}", 0, False\n'
+    # VBS 字符串中转义双引号
+    cmd_escaped = cmd.replace('"', '""')
+    vbs = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd_escaped}", 0, False\n'
     with open(shortcut_path, "w", encoding="utf-8") as f:
         f.write(vbs)
     _print(f"已创建开机自启: {shortcut_path}")

@@ -56,6 +56,10 @@ def _write_conn_status(connected: bool, transport: str = "", port: str = "") -> 
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
             f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         os.replace(tmp, CONN_STATUS_FILE)
     except OSError:
         pass
@@ -325,9 +329,7 @@ def _pid_file_alive() -> bool:
 # ── 主循环 ────────────────────────────────────────────────
 def _run_once(link, cfg: dict, cfg_path: str) -> None:
     """主循环：轮询状态文件，发送 SET_MULTI 帧。"""
-    import os as _os
-
-    cfg_mtime = _os.path.getmtime(cfg_path) if _os.path.isfile(cfg_path) else 0
+    cfg_mtime = os.path.getmtime(cfg_path) if os.path.isfile(cfg_path) else 0
     last_frame = None
     last_state = "off"
     last_switch = 0.0
@@ -340,7 +342,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
 
             # 配置热重载
             try:
-                m = _os.path.getmtime(cfg_path)
+                m = os.path.getmtime(cfg_path)
                 if m != cfg_mtime:
                     cfg = load_config()
                     cfg_mtime = m
@@ -430,16 +432,15 @@ def main() -> None:
     atexit.register(_on_exit)
 
     # 加载配置
-    cfg = load_config()
-    cfg_path = os.path.join(os.path.dirname(PID_FILE), "..",
-                            "VibeCodingLight", "config.json")
-    # 修正路径
     from .config import CONFIG_PATH
+    cfg = load_config()
     cfg_path = CONFIG_PATH
 
     while True:
         link = None
         try:
+            # 每次重连前重新加载配置（热重载在 _run_once 内处理，这里是断线重连后）
+            cfg = load_config()
             transport = cfg.get("transport", "serial")
             _write_conn_status(False, transport)
 

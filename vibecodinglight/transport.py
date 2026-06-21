@@ -198,7 +198,8 @@ class BleLink:
                 log.warning("BLE 会话异常: %s", ex)
             finally:
                 self._connected.clear()
-                self._drain(False)
+                # 不在这里 drain 队列：断线期间排队的命令在重连后仍应发送
+                # 只在 close() 时 drain
 
             if not self._stop.is_set():
                 await asyncio.sleep(backoff)

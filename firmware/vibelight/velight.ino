@@ -257,11 +257,16 @@ static void pwmRefreshTask(void *param) {
         brs = s_breathSync;
         portEXIT_CRITICAL(&s_ledMux);
 
+        // 钳位周期范围（临界区外，避免持锁过久）
+        if (bp < PERIOD_MS_MIN) bp = PERIOD_MS_MIN;
+        if (bp > PERIOD_MS_MAX) bp = PERIOD_MS_MAX;
+        if (brp < PERIOD_MS_MIN) brp = PERIOD_MS_MIN;
+        if (brp > PERIOD_MS_MAX) brp = PERIOD_MS_MAX;
+
         uint64_t now_us = (uint64_t)esp_timer_get_time();
 
         // 计算同步闪烁相位
         bool blinkOn = true;
-        if (bp < PERIOD_MS_MIN) bp = PERIOD_MS_MIN;
         {
             uint64_t span = (uint64_t)bp * 1000ULL;
             uint64_t ph = now_us % span;
@@ -271,10 +276,7 @@ static void pwmRefreshTask(void *param) {
         // 计算同步呼吸包络
         uint16_t breathBase = 0;
         {
-            uint16_t per = brp;
-            if (per < PERIOD_MS_MIN) per = PERIOD_MS_MIN;
-            if (per > PERIOD_MS_MAX) per = PERIOD_MS_MAX;
-            uint64_t span_us = (uint64_t)per * 1000ULL;
+            uint64_t span_us = (uint64_t)brp * 1000ULL;
             if (span_us < 2000ULL) span_us = 2000ULL;
             uint64_t ph = now_us % span_us;
             uint64_t x = (ph * 510ULL) / span_us;

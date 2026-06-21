@@ -4,7 +4,7 @@ import pytest
 from vibecodinglight import protocol as proto
 from vibecodinglight.daemon import _pick_highest, _mixed_frame, _state_to_frame
 from vibecodinglight.hooks import _resolve_state
-from vibecodinglight.config import PRIORITY, load_config
+from vibecodinglight.config import PRIORITY, load_config, _validate_config
 
 
 class TestProtocol:
@@ -142,3 +142,46 @@ class TestPriority:
 
     def test_idle_higher_than_off(self):
         assert PRIORITY["idle"] < PRIORITY["off"]
+
+
+class TestConfigValidation:
+    def test_valid_config_passes(self):
+        cfg = {"mode": "claude", "duty_g": 200, "duty_y": 100, "duty_r": 50,
+               "blink_period_ms": 500, "breath_period_ms": 2000, "transport": "serial",
+               "serial_port": "COM3"}
+        result = _validate_config(cfg)
+        assert result["mode"] == "claude"
+        assert result["duty_g"] == 200
+
+    def test_invalid_mode_falls_back(self):
+        cfg = {"mode": "invalid"}
+        result = _validate_config(cfg)
+        assert result["mode"] == "claude"
+
+    def test_invalid_transport_falls_back(self):
+        cfg = {"transport": "wifi"}
+        result = _validate_config(cfg)
+        assert result["transport"] == "serial"
+
+    def test_duty_clamped_high(self):
+        cfg = {"duty_g": 999, "duty_y": -1, "duty_r": 300}
+        result = _validate_config(cfg)
+        assert result["duty_g"] == 255
+        assert result["duty_y"] == 0
+        assert result["duty_r"] == 255
+
+    def test_period_clamped(self):
+        cfg = {"blink_period_ms": 10, "breath_period_ms": 99999}
+        result = _validate_config(cfg)
+        assert result["blink_period_ms"] == 50
+        assert result["breath_period_ms"] == 60000
+
+    def test_invalid_duty_type_falls_back(self):
+        cfg = {"duty_g": "abc"}
+        result = _validate_config(cfg)
+        assert result["duty_g"] == 255
+
+    def test_empty_serial_port_falls_back(self):
+        cfg = {"serial_port": ""}
+        result = _validate_config(cfg)
+        assert result["serial_port"] == "auto"

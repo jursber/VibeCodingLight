@@ -62,13 +62,52 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """校验并修正配置值，损坏的字段回退到默认值。"""
+    defaults = _DEFAULT_CONFIG
+    result = dict(cfg)
+
+    # 模式校验
+    if result.get("mode") not in ("claude", "codex", "mixed"):
+        result["mode"] = defaults["mode"]
+
+    # 传输方式校验
+    if result.get("transport") not in ("serial", "ble"):
+        result["transport"] = defaults["transport"]
+
+    # 亮度校验 (0-255)
+    for key in ("duty_g", "duty_y", "duty_r"):
+        try:
+            v = int(result.get(key, defaults[key]))
+            result[key] = max(0, min(255, v))
+        except (TypeError, ValueError):
+            result[key] = defaults[key]
+
+    # 周期校验 (50-60000)
+    for key in ("blink_period_ms", "breath_period_ms"):
+        try:
+            v = int(result.get(key, defaults[key]))
+            result[key] = max(50, min(60000, v))
+        except (TypeError, ValueError):
+            result[key] = defaults[key]
+
+    # 串口校验
+    if not isinstance(result.get("serial_port"), str) or not result["serial_port"]:
+        result["serial_port"] = defaults["serial_port"]
+
+    return result
+
+
 def load_config() -> dict[str, Any]:
-    """加载配置文件，不存在则创建默认配置。"""
+    """加载配置文件，不存在则创建默认配置。配置损坏时自动修正。"""
     _ensure_dir(_APP_DIR)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("config is not a dict")
+        return _validate_config(raw)
+    except (OSError, json.JSONDecodeError, ValueError):
         cfg = dict(_DEFAULT_CONFIG)
         save_config(cfg)
         return cfg
@@ -89,7 +128,9 @@ def save_config(cfg: dict) -> None:
 
 
 def state_dir_for(agent: str) -> str:
-    """获取某个 agent 的状态目录。"""
+    """获取某个 agent 的状态目录。agent 参数必须是纯名称，不含路径分隔符。"""
+    if os.sep in agent or "/" in agent or not agent:
+        raise ValueError(f"Invalid agent name: {agent!r}")
     d = os.path.join(STATES_ROOT, agent)
     _ensure_dir(d)
     return d

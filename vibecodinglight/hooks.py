@@ -43,7 +43,9 @@ def _read_stdin_json() -> dict[str, Any]:
 
     t = threading.Thread(target=_reader, daemon=True)
     t.start()
-    done.wait(timeout=STDIN_TIMEOUT)
+    if not done.wait(timeout=STDIN_TIMEOUT):
+        # stdin 读取超时，返回空（hook 进程不应长时间阻塞）
+        pass
     return result
 
 
@@ -129,7 +131,9 @@ def main_set_state() -> None:
     if len(args) < 2:
         sys.exit(1)
 
-    agent = args[0]
+    agent = args[0].lower().strip()
+    if agent not in ("claude", "codex"):
+        sys.exit(1)
     state_hint = args[1]
 
     event = ""
@@ -214,7 +218,9 @@ def main_set_alert() -> None:
     写入 alert 状态，然后输出 defer JSON 让 IDE 继续显示权限弹窗。
     """
     args = sys.argv[1:]
-    agent = args[0] if args else "claude"
+    agent = (args[0] if args else "claude").lower().strip()
+    if agent not in ("claude", "codex"):
+        agent = "claude"
 
     stdin_data = _read_stdin_json()
     session_id = (stdin_data.get("session_id") or
