@@ -481,6 +481,16 @@ def _frame_for_states(mode: str, claude_states: dict[str, dict],
     return _state_to_frame(best_state, cfg), best_state, bool(states)
 
 
+def _has_non_idle_activity(mode: str, label: str,
+                           claude_states: dict[str, dict],
+                           codex_states: dict[str, dict]) -> bool:
+    """Return whether any visible session is actively doing work."""
+    if mode == "mixed":
+        entries = list(claude_states.values()) + list(codex_states.values())
+        return any(str(item.get("state", "off")) not in {"off", "idle"} for item in entries)
+    return label not in {"off", "idle"}
+
+
 # Single-instance guard
 def _acquire_lock():
     try:
@@ -543,7 +553,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 mode, claude_states, codex_states, cfg
             )
 
-            if has_active_sessions and "off" not in best_state and "idle" not in best_state:
+            if has_active_sessions and _has_non_idle_activity(mode, best_state, claude_states, codex_states):
                 last_activity = now
 
             # Turn lights off after long inactivity.

@@ -10,6 +10,7 @@ from vibecodinglight.daemon import (
     _mixed_frame,
     _state_to_frame,
     _frame_for_states,
+    _has_non_idle_activity,
     _record_to_state,
     _read_states,
 )
@@ -205,6 +206,16 @@ class TestDaemon:
         assert parsed[5] == proto.CH_OFF     # prior idle for this session is gone
         assert label == "claude:thinking,codex:off"
         assert active is True
+
+    def test_mixed_activity_detection_ignores_other_agent_off_label(self):
+        now = time.time()
+
+        assert _has_non_idle_activity(
+            "mixed",
+            "claude:off,codex:model",
+            {},
+            {"codex-session": {"state": "model", "ts": now}},
+        ) is True
 
     def test_record_to_state_parallel_tools_stays_model_until_all_finish(self):
         now = time.time()
