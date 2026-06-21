@@ -23,31 +23,31 @@ class HookEntry:
 # 只保留实际需要接线的事件，不接线的不列入
 CLAUDE_HOOKS: tuple[HookEntry, ...] = (
     HookEntry("SessionStart",       True,  None),       # 启动 daemon
-    HookEntry("UserPromptSubmit",   True,  "thinking"),  # 用户输入 → 思考
-    HookEntry("PreToolUse",         True,  "auto"),      # 工具调用前 → auto 判断
-    HookEntry("PermissionRequest",  True,  "alert"),     # 权限请求 → alert
-    HookEntry("PostToolUse",        True,  "thinking"),  # 工具完成 → 思考
-    HookEntry("PostToolUseFailure", True,  "alert"),     # 工具失败 → alert
-    HookEntry("PostToolBatch",      True,  "thinking"),  # 批量工具完成 → 思考
-    HookEntry("SubagentStart",      True,  "thinking"),  # 子代理启动 → 思考
-    HookEntry("Stop",               True,  "idle"),      # 回合结束 → idle
-    HookEntry("StopFailure",        True,  "alert"),     # 回合失败 → alert
-    HookEntry("SessionEnd",         True,  "off"),       # 会话结束 → 灯灭
+    HookEntry("UserPromptSubmit",   True,  "thinking"),  # 用户输入 → 黄灯呼吸
+    HookEntry("PreToolUse",         True,  "auto"),      # 调用工具 → 绿灯闪烁
+    HookEntry("PermissionRequest",  True,  "alert"),     # 权限请求 → 红灯闪烁
+    HookEntry("PostToolUse",        True,  "working"),   # 工具完成 → 绿灯常亮
+    HookEntry("PostToolUseFailure", True,  "alert"),     # 工具失败 → 红灯闪烁
+    HookEntry("PostToolBatch",      True,  "working"),   # 批量工具完成 → 绿灯常亮
+    HookEntry("SubagentStart",      True,  "thinking"),  # 子代理启动 → 黄灯呼吸
+    HookEntry("Stop",               True,  "idle"),      # 回合结束 → 红灯常亮
+    HookEntry("StopFailure",        True,  "alert"),     # 回合失败 → 红灯闪烁
+    HookEntry("SessionEnd",         True,  "off"),       # 会话结束 → 全灭
 )
 
 # ── Codex Hook 事件 ───────────────────────────────────────
 CODEX_HOOKS: tuple[HookEntry, ...] = (
     HookEntry("SessionStart",       True,  None),       # 启动 daemon
-    HookEntry("UserPromptSubmit",   True,  "thinking"),
-    HookEntry("PreToolUse",         True,  "auto"),
-    HookEntry("PermissionRequest",  True,  "alert"),
-    HookEntry("PostToolUse",        True,  "thinking"),
-    HookEntry("SubagentStart",      True,  "thinking"),
-    HookEntry("SubagentStop",       True,  "working"),   # Codex 子代理结束 → 工作
-    HookEntry("Stop",               True,  "idle"),
-    HookEntry("PreCompact",         True,  "thinking"),
-    HookEntry("PostCompact",        True,  "idle"),
-    HookEntry("SessionEnd",         True,  "off"),
+    HookEntry("UserPromptSubmit",   True,  "thinking"),  # 黄灯呼吸
+    HookEntry("PreToolUse",         True,  "auto"),      # 绿灯闪烁
+    HookEntry("PermissionRequest",  True,  "alert"),     # 红灯闪烁
+    HookEntry("PostToolUse",        True,  "working"),   # 绿灯常亮
+    HookEntry("SubagentStart",      True,  "thinking"),  # 黄灯呼吸
+    HookEntry("SubagentStop",       True,  "working"),   # 绿灯常亮
+    HookEntry("Stop",               True,  "idle"),      # 红灯常亮
+    HookEntry("PreCompact",         True,  "thinking"),  # 黄灯呼吸
+    HookEntry("PostCompact",        True,  "idle"),      # 红灯常亮
+    HookEntry("SessionEnd",         True,  "off"),       # 全灭
 )
 
 
