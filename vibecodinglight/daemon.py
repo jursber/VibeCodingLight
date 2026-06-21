@@ -384,22 +384,21 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
             except OSError:
                 pass
 
-            # 读取状态
-            has_active_sessions = False
+            # 读取状态（任意时刻只显示一个灯，取所有终端中优先级最高的）
             if mode == "mixed":
                 claude_states = _read_states("claude")
                 codex_states = _read_states("codex")
-                claude_best = _pick_highest(claude_states)
-                codex_best = _pick_highest(codex_states)
-                best_state = min(claude_best, codex_best,
-                                 key=lambda s: PRIORITY.get(s, 99))
-                has_active_sessions = bool(claude_states or codex_states)
-                frame = _mixed_frame(claude_best, codex_best, cfg)
+                all_states = {}
+                all_states.update(claude_states)
+                all_states.update(codex_states)
+                best_state = _pick_highest(all_states)
+                has_active_sessions = bool(all_states)
             else:
                 states = _read_states(mode)
                 best_state = _pick_highest(states)
                 has_active_sessions = bool(states)
-                frame = _state_to_frame(best_state, cfg)
+
+            frame = _state_to_frame(best_state, cfg)
 
             # 有非 off/idle 的活动状态时更新最后活动时间
             if has_active_sessions and best_state not in ("off", "idle"):

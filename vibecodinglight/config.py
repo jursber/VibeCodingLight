@@ -24,12 +24,12 @@ BLE_CHAR_UUID = "e52c12b7-7ac3-4636-9c17-3d608bcea796"
 
 # ── 状态优先级（数字越小越优先）───────────────────────────
 PRIORITY = {
-    "alert":    1,
-    "thinking": 2,
-    "model":    3,
-    "working":  4,
-    "idle":     5,
-    "off":      6,
+    "alert":    1,   # 等待用户批准/报错
+    "thinking": 2,   # 模型思考中
+    "model":    3,   # 调用工具/等待 LLM
+    "working":  4,   # 正在工作
+    "idle":     5,   # 等待用户输入
+    "off":      6,   # 会话结束
 }
 
 ACTIVE_STATES = {"alert", "thinking", "model", "working"}
