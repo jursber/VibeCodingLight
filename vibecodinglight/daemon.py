@@ -14,6 +14,7 @@ import json
 import logging
 import msvcrt
 import os
+import signal
 import sys
 import time
 import traceback
@@ -44,6 +45,7 @@ STATE_FILE_TTL = 1800         # 30 分钟
 MIN_ACTIVE_HOLD_S = 0.5       # 最短显示时间
 INACTIVITY_TIMEOUT_S = 1800   # 30 分钟无活动自动熄灯
 ALERT_STALE_S = 5.0           # alert 超过此秒数后，如果有更新的非 alert 状态则降级
+ACTIVE_STATE_STALE_S = 30     # 活跃状态文件 mtime 超过此秒数未更新，自动降级为 idle
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working"}
 CONN_STATUS_TTL = 6.0
 
@@ -138,9 +140,9 @@ def _read_states(agent: str) -> dict[str, dict]:
                 ts = os.path.getmtime(path)
                 is_sub = False
 
-            # 活动态超时降级
+            # 活动态超时降级（基于 JSON 中的 ts，5 分钟硬超时）
             if state in ACTIVE_STATES and ts > 0 and now - ts > ACTIVE_STATE_TTL:
-                log.info("Session %s/%s state %s expired, → idle", agent, name, state)
+                log.info("Session %s/%s state %s expired (ts), → idle", agent, name, state)
                 state = "idle"
                 ts = now
                 try:
@@ -148,6 +150,26 @@ def _read_states(agent: str) -> dict[str, dict]:
                     with open(tmp, "w") as f:
                         json.dump({"state": "idle", "ts": ts}, f)
                     os.replace(tmp, path)
+                except OSError:
+                    pass
+
+            # 活动态新鲜度检测（基于文件 mtime，30 秒无更新则降级）
+            # 解决 Ctrl+C 取消任务后状态文件不更新、灯一直绿的问题
+            if state in ACTIVE_STATES:
+                try:
+                    file_mtime = os.path.getmtime(path)
+                    if now - file_mtime > ACTIVE_STATE_STALE_S:
+                        log.info("Session %s/%s state %s stale (mtime %.1fs ago), → idle",
+                                 agent, name, state, now - file_mtime)
+                        state = "idle"
+                        ts = now
+                        try:
+                            tmp = path + ".tmp"
+                            with open(tmp, "w") as f:
+                                json.dump({"state": "idle", "ts": ts}, f)
+                            os.replace(tmp, path)
+                        except OSError:
+                            pass
                 except OSError:
                     pass
 
@@ -473,6 +495,46 @@ def main() -> None:
         _write_conn_status(False, "stopped")
 
     atexit.register(_on_exit)
+
+    # 信号处理：收到 SIGINT/SIGTERM 时，写入 idle 状态后退出
+    def _signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        log.info("收到信号 %s，正在优雅退出...", sig_name)
+        # 为所有活跃 session 写入 idle 状态
+        try:
+            cfg = load_config()
+            mode = cfg.get("mode", "claude")
+            agents = ["claude", "codex"] if mode == "mixed" else [mode]
+            for agent in agents:
+                d = state_dir_for(agent)
+                try:
+                    for name in os.listdir(d):
+                        if name.endswith(".tmp") or name.startswith("_"):
+                            continue
+                        path = os.path.join(d, name)
+                        try:
+                            with open(path, "r") as f:
+                                raw = f.read().strip()
+                            if raw.startswith("{"):
+                                data = json.loads(raw)
+                                if data.get("state") in ACTIVE_STATES:
+                                    tmp = path + ".tmp"
+                                    with open(tmp, "w") as f:
+                                        json.dump({"state": "idle", "ts": time.time()}, f)
+                                    os.replace(tmp, path)
+                        except (OSError, json.JSONDecodeError):
+                            pass
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        _write_conn_status(False, "stopped")
+        sys.exit(0)
+
+    if sys.platform == "win32":
+        signal.signal(signal.SIGBREAK, _signal_handler)
+    else:
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     # 加载配置
     from .config import CONFIG_PATH

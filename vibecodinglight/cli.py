@@ -503,12 +503,14 @@ Function IsDaemonRunning()
     pid = Trim(f.ReadAll())
     f.Close
     If pid = "" Then Exit Function
-    Set exec = WshShell.Exec("cmd /c tasklist /FI ""PID eq " & pid & """ /NH")
-    output = ""
-    Do While Not exec.StdOut.AtEndOfStream
-        output = output & exec.StdOut.ReadLine()
-    Loop
-    IsDaemonRunning = (InStr(output, pid) > 0 And InStr(output, "python") > 0)
+    ' 用 WMI 查询进程，完全无窗口
+    On Error Resume Next
+    Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")
+    If Err.Number <> 0 Then Err.Clear: Exit Function
+    Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & pid)
+    If Err.Number <> 0 Then Err.Clear: Exit Function
+    IsDaemonRunning = (procs.Count > 0)
+    On Error GoTo 0
 End Function
 
 ' 首次启动
