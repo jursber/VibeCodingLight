@@ -1,10 +1,10 @@
 """
-VibeCodingLight 守护进程。
+VibeCodingLight daemon.
 
-核心功能：
-  1. 读取 claude/codex 的状态文件，按模式合并
-  2. 生成 SET_MULTI 帧发送到硬件
-  3. 单实例保障、配置热重载、自动重连
+Core responsibilities:
+  1. Read Claude/Codex state files and merge them by display mode.
+  2. Build SET_MULTI frames for the hardware.
+  3. Keep a single daemon instance, hot-reload config, and reconnect hardware.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .config import (
 from .proc import pid_alive
 from . import protocol as proto
 
-# ── 日志 ──────────────────────────────────────────────────
+# Logging
 os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -36,23 +36,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("vibe.daemon")
 
-# ── 常量 ──────────────────────────────────────────────────
+# Constants
 POLL_INTERVAL = 0.05          # 50ms
 RECONNECT_INTERVAL = 2
 ERROR_RETRY_INTERVAL = 1
-ACTIVE_STATE_TTL = 300        # 5 分钟
-STATE_FILE_TTL = 1800         # 30 分钟
-MIN_ACTIVE_HOLD_S = 0.5       # 最短显示时间
-INACTIVITY_TIMEOUT_S = 1800   # 30 分钟无活动自动熄灯
-ALERT_STALE_S = 5.0           # alert 超过此秒数后，如果有更新的非 alert 状态则降级
-ACTIVE_STATE_STALE_S = 30     # 活跃状态文件 mtime 超过此秒数未更新，自动降级为 idle
+ACTIVE_STATE_TTL = 300        # 5 minutes
+STATE_FILE_TTL = 1800         # 30 minutes
+MIN_ACTIVE_HOLD_S = 0.5
+INACTIVITY_TIMEOUT_S = 1800
+ALERT_STALE_S = 5.0
+ACTIVE_STATE_STALE_S = 30     # Active state file mtime staleness threshold.
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
 CONN_STATUS_TTL = 6.0
 DERIVED_ACTIVE_STALE_S = 45.0
 FALLBACK_TOOL_EXPIRE_S = 300.0
 
 
-# ── 连接状态文件 ──────────────────────────────────────────
+# Connection status file
 def _write_conn_status(connected: bool, transport: str = "", port: str = "") -> None:
     data = {"connected": connected, "transport": transport, "ts": time.time()}
     if port:
@@ -71,7 +71,7 @@ def _write_conn_status(connected: bool, transport: str = "", port: str = "") -> 
         pass
 
 
-# ── 状态文件读取 ──────────────────────────────────────────
+# State file reading
 def _read_idle_ack_ts() -> float:
     try:
         with open(IDLE_ACK_FILE, "r", encoding="utf-8") as f:
@@ -82,7 +82,7 @@ def _read_idle_ack_ts() -> float:
 
 
 def _read_states(agent: str) -> dict[str, dict]:
-    """读取某个 agent 的所有 session 状态。"""
+    """Read all session states for an agent."""
     d = state_dir_for(agent)
     states: dict[str, dict] = {}
     now = time.time()
@@ -93,7 +93,7 @@ def _read_states(agent: str) -> dict[str, dict]:
     except OSError:
         return states
 
-    # 检查 _global_off
+    # Honor a recent _global_off marker unless newer session states exist.
     goff = os.path.join(d, "_global_off")
     if "_global_off" in files:
         try:
@@ -101,7 +101,6 @@ def _read_states(agent: str) -> dict[str, dict]:
                 raw = f.read().strip()
             ts = json.loads(raw).get("ts", 0) if raw.startswith("{") else 0
             if now - ts < 10:
-                # 检查是否有比 _global_off 更新的文件
                 newer = False
                 for name in files:
                     if name.endswith(".tmp") or name.startswith("_"):
@@ -134,7 +133,6 @@ def _read_states(agent: str) -> dict[str, dict]:
         except (OSError, json.JSONDecodeError):
             pass
 
-    # 读取 session 状态
     for name in files:
         if name.endswith(".tmp") or name.startswith("_"):
             continue
@@ -148,14 +146,16 @@ def _read_states(agent: str) -> dict[str, dict]:
                 state = derived.get("state", "")
                 ts = derived.get("ts", data.get("ts", 0))
                 is_sub = derived.get("is_subagent", data.get("is_subagent", False))
+                has_derived_active = bool(data.get("active_tools") or data.get("active_subagents"))
             else:
                 state = raw
                 ts = os.path.getmtime(path)
                 is_sub = False
+                has_derived_active = False
 
-            # 活动态超时降级（基于 JSON 中的 ts，5 分钟硬超时）
+            # Hard-expire active states by their logical JSON timestamp.
             if state in ACTIVE_STATES and ts > 0 and now - ts > ACTIVE_STATE_TTL:
-                log.info("Session %s/%s state %s expired (ts), → idle", agent, name, state)
+                log.info("Session %s/%s state %s expired (ts), -> idle", agent, name, state)
                 state = "idle"
                 ts = now
                 try:
@@ -166,18 +166,23 @@ def _read_states(agent: str) -> dict[str, dict]:
                 except OSError:
                     pass
 
-            # 活动态新鲜度检测：不直接假装 idle，先进入 stale。
             if state in ACTIVE_STATES:
                 try:
                     file_mtime = os.path.getmtime(path)
                     if now - file_mtime > ACTIVE_STATE_STALE_S:
-                        log.info("Session %s/%s state %s stale (mtime %.1fs ago), → stale",
-                                 agent, name, state, now - file_mtime)
-                        state = "stale"
+                        if has_derived_active:
+                            log.info("Session %s/%s state %s stale (mtime %.1fs ago), -> stale",
+                                     agent, name, state, now - file_mtime)
+                            state = "stale"
+                        else:
+                            log.info("Session %s/%s state %s stale without active work (mtime %.1fs ago), -> idle",
+                                     agent, name, state, now - file_mtime)
+                            state = "idle"
+                            ts = now
                 except OSError:
                     pass
 
-            # 文件过期删除
+            # Remove very old state files.
             if ts > 0 and now - ts > STATE_FILE_TTL and state != "off":
                 try:
                     os.remove(path)
@@ -207,7 +212,7 @@ def _newest_ts(entries: dict[str, dict]) -> float:
 
 
 def _record_to_state(record: dict, now: float | None = None) -> dict:
-    """从状态账本推导当前可显示状态。"""
+    """Derive the display state from one session ledger."""
     now = time.time() if now is None else now
     active_tools = record.get("active_tools") if isinstance(record.get("active_tools"), dict) else {}
     active_subagents = record.get("active_subagents") if isinstance(record.get("active_subagents"), dict) else {}
@@ -239,17 +244,12 @@ def _record_to_state(record: dict, now: float | None = None) -> dict:
 
 
 def _pick_highest(states: dict[str, dict]) -> str:
-    """从状态集合中选出最高优先级的状态名。
-
-    特殊规则：alert 超过 ALERT_STALE_S 秒后，如果有更新的非 alert 状态则降级。
-    解决问题：PermissionRequest 写入 alert 后，用户批准了操作但红灯一直闪。
-    """
+    """Pick the highest-priority state from a set of session states."""
     if not states:
         return "off"
 
     now = time.time()
 
-    # 找到最高优先级的非 alert 状态及其时间
     best_non_alert = "off"
     best_non_alert_p = 99
     best_non_alert_ts = 0.0
@@ -264,17 +264,15 @@ def _pick_highest(states: dict[str, dict]) -> str:
             has_alert = True
             if ts > newest_alert_ts:
                 newest_alert_ts = ts
-            continue  # alert 不参与 best_non_alert 计算
+            continue  # alert is handled separately.
         if p < best_non_alert_p or (p == best_non_alert_p and ts > best_non_alert_ts):
             best_non_alert = s
             best_non_alert_p = p
             best_non_alert_ts = ts
 
-    # 如果有 alert，检查是否过期
     if has_alert:
         alert_age = now - newest_alert_ts
         if alert_age > ALERT_STALE_S:
-            # alert 过期，如果有更新的非 alert 状态则使用它
             if best_non_alert != "off" and best_non_alert_ts > newest_alert_ts:
                 return best_non_alert
         return "alert"
@@ -282,9 +280,9 @@ def _pick_highest(states: dict[str, dict]) -> str:
     return best_non_alert
 
 
-# ── 状态 → 帧映射 ────────────────────────────────────────
+# State-to-frame mapping
 def _state_to_frame(state: str, cfg: dict) -> bytes:
-    """将状态映射为 SET_MULTI 帧。"""
+    """Map a state name to a SET_MULTI frame."""
     bp = cfg.get("blink_period_ms", 800)
     brp = cfg.get("breath_period_ms", 3000)
     dg = cfg.get("duty_g", 255)
@@ -330,7 +328,6 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
             duty_g=dg, blink_period=max(bp, 1200), breath_period=brp,
         )
 
-    # 默认：红灯常亮（idle）
     return proto.build_set_multi(
         proto.CH_OFF, proto.CH_OFF, proto.CH_SOLID,
         duty_r=dr, blink_period=bp, breath_period=brp,
@@ -338,23 +335,14 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
 
 
 def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
-    """混合模式：同时显示两个 agent 的状态。
-
-    优先级映射到通道：
-      alert(idle) → 红灯
-      thinking    → 黄灯
-      model/working → 绿灯
-
-    如果两个 agent 映射到同一通道，选高优先级的。
-    如果映射到不同通道，同时亮。
-    """
+    """Build a mixed-mode frame from two aggregate agent states."""
     bp = cfg.get("blink_period_ms", 800)
     brp = cfg.get("breath_period_ms", 3000)
     dg = cfg.get("duty_g", 255)
     dy = cfg.get("duty_y", 255)
     dr = cfg.get("duty_r", 255)
 
-    # 状态 → (通道, 模式, duty)
+    # state -> (channel, mode, duty)
     def _channel_map(state: str):
         if state in ("alert",):
             return "red", proto.CH_BLINK, dr
@@ -373,33 +361,30 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
     c_ch, c_mode, c_duty = _channel_map(claude_state)
     x_ch, x_mode, x_duty = _channel_map(codex_state)
 
-    # 初始化：全部关闭
+    # Start with all channels off.
     modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
     dutys = [0, 0, 0]
 
     ch_idx = {"green": 0, "yellow": 1, "red": 2}
 
-    # 放置 Claude 状态
     if c_ch != "off":
         idx = ch_idx[c_ch]
         modes[idx] = c_mode
         dutys[idx] = c_duty
 
-    # 放置 Codex 状态（如果通道冲突，选高优先级）
+    # Add Codex state, resolving same-channel conflicts by priority.
     if x_ch != "off":
         idx = ch_idx[x_ch]
         if modes[idx] == proto.CH_OFF:
             modes[idx] = x_mode
             dutys[idx] = x_duty
         else:
-            # 通道冲突：选高优先级
             c_p = PRIORITY.get(claude_state, 4.5 if claude_state == "stale" else 99)
             x_p = PRIORITY.get(codex_state, 4.5 if codex_state == "stale" else 99)
             if x_p < c_p:
                 modes[idx] = x_mode
                 dutys[idx] = x_duty
 
-    # 如果全部关闭，显示红灯常亮（idle）
     if all(m == proto.CH_OFF for m in modes):
         modes[2] = proto.CH_SOLID
         dutys[2] = dr
@@ -486,7 +471,7 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
 
 def _frame_for_states(mode: str, claude_states: dict[str, dict],
                       codex_states: dict[str, dict], cfg: dict) -> tuple[bytes, str, bool]:
-    """根据模式和状态集合生成硬件帧、日志标签和是否有活动 session。"""
+    """Build a frame for the selected display mode."""
     if mode == "mixed":
         label = f"claude:{_state_summary(claude_states)},codex:{_state_summary(codex_states)}"
         return _mixed_frame_from_entries(claude_states, codex_states, cfg), label, bool(claude_states or codex_states)
@@ -496,7 +481,7 @@ def _frame_for_states(mode: str, claude_states: dict[str, dict],
     return _state_to_frame(best_state, cfg), best_state, bool(states)
 
 
-# ── 单实例保障 ────────────────────────────────────────────
+# Single-instance guard
 def _acquire_lock():
     try:
         fd = os.open(LOCK_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
@@ -523,14 +508,14 @@ def _pid_file_alive() -> bool:
         return False
 
 
-# ── 主循环 ────────────────────────────────────────────────
+# Main loop
 def _run_once(link, cfg: dict, cfg_path: str) -> None:
-    """主循环：轮询状态文件，发送 SET_MULTI 帧。"""
+    """Poll state files and send SET_MULTI frames."""
     cfg_mtime = os.path.getmtime(cfg_path) if os.path.isfile(cfg_path) else 0
     last_frame = None
     last_state = "off"
     last_switch = 0.0
-    last_activity = time.time()  # 最后一次有活动状态的时间
+    last_activity = time.time()
 
     mode = cfg.get("mode", "claude")
 
@@ -539,9 +524,8 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
             now = time.time()
 
             if hasattr(link, "health_check") and not link.health_check():
-                raise ConnectionError("硬件连接断开: health_check failed")
+                raise ConnectionError("hardware disconnected: health_check failed")
 
-            # 配置热重载
             try:
                 m = os.path.getmtime(cfg_path)
                 if m != cfg_mtime:
@@ -549,7 +533,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                     cfg_mtime = m
                     mode = cfg.get("mode", "claude")
                     last_frame = None
-                    log.info("配置已热重载, mode=%s", mode)
+                    log.info("Config hot-reloaded, mode=%s", mode)
             except OSError:
                 pass
 
@@ -559,16 +543,14 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 mode, claude_states, codex_states, cfg
             )
 
-            # 有非 off/idle 的活动状态时更新最后活动时间
             if has_active_sessions and "off" not in best_state and "idle" not in best_state:
                 last_activity = now
 
-            # 30 分钟无活动 → 熄灯
+            # Turn lights off after long inactivity.
             if (now - last_activity) > INACTIVITY_TIMEOUT_S:
                 frame = proto.build_off()
                 best_state = "off"
 
-            # 最短显示时间保护
             if (
                 last_state in ACTIVE_HOLD_STATES
                 and (now - last_switch) < MIN_ACTIVE_HOLD_S
@@ -578,17 +560,17 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # 发送帧
+            # Send changed frame.
             if frame != last_frame:
                 if not link.send_raw(frame, wait=True):
-                    detail = getattr(link, "last_error", "") or "无底层错误信息"
+                    detail = getattr(link, "last_error", "") or "no low-level error"
                     try:
                         link.close()
                     except Exception:
                         pass
-                    raise ConnectionError(f"硬件连接断开: {detail}")
+                    raise ConnectionError(f"hardware disconnected: {detail}")
                 if best_state != last_state:
-                    log.info("灯态: %s → %s (%s)", last_state, best_state, frame.hex())
+                    log.info("Light state: %s -> %s (%s)", last_state, best_state, frame.hex())
                 last_frame = frame
                 last_state = best_state
                 last_switch = now
@@ -598,13 +580,12 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
         except ConnectionError:
             raise
         except Exception:
-            log.warning("主循环异常: %s", traceback.format_exc())
+            log.warning("Main loop error: %s", traceback.format_exc())
             time.sleep(POLL_INTERVAL)
 
 
 def main() -> None:
-    """守护进程主入口。"""
-    # 单实例检查
+    """Run the daemon process."""
     lock_fd = _acquire_lock()
     if lock_fd is None and not _pid_file_alive():
         try:
@@ -617,7 +598,7 @@ def main() -> None:
     if lock_fd is None:
         sys.exit(0)
 
-    # 写 PID
+    # Write PID.
     pid_str = str(os.getpid())
     pid_tmp = PID_FILE + ".tmp"
     with open(pid_tmp, "w", encoding="utf-8") as f:
@@ -625,19 +606,17 @@ def main() -> None:
         f.flush()
     os.replace(pid_tmp, PID_FILE)
 
-    log.info("守护进程启动, PID=%d", os.getpid())
+    log.info("Daemon started, PID=%d", os.getpid())
 
     def _on_exit():
-        log.info("守护进程退出, PID=%d", os.getpid())
+        log.info("Daemon stopped, PID=%d", os.getpid())
         _write_conn_status(False, "stopped")
 
     atexit.register(_on_exit)
 
-    # 信号处理：收到 SIGINT/SIGTERM 时，写入 idle 状态后退出
     def _signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
-        log.info("收到信号 %s，正在优雅退出...", sig_name)
-        # 为所有活跃 session 写入 idle 状态
+        log.info("Received %s, shutting down gracefully...", sig_name)
         try:
             cfg = load_config()
             mode = cfg.get("mode", "claude")
@@ -673,7 +652,7 @@ def main() -> None:
     else:
         signal.signal(signal.SIGTERM, _signal_handler)
 
-    # 加载配置
+    # Load config.
     from .config import CONFIG_PATH
     cfg = load_config()
     cfg_path = CONFIG_PATH
@@ -681,7 +660,6 @@ def main() -> None:
     while True:
         link = None
         try:
-            # 每次重连前重新加载配置（热重载在 _run_once 内处理，这里是断线重连后）
             cfg = load_config()
             transport = cfg.get("transport", "serial")
             _write_conn_status(False, transport)
@@ -691,9 +669,8 @@ def main() -> None:
             configured_port = str(cfg.get("serial_port") or "auto")
             port = configured_port if configured_port.lower() != "auto" else find_esp32_port()
             _write_conn_status(True, transport, port or "")
-            log.info("硬件已连接 (transport=%s)", transport)
+            log.info("Hardware connected (transport=%s)", transport)
 
-            # 启动动画：全亮 2 秒
             boot_frame = proto.build_set_multi(
                 proto.CH_SOLID, proto.CH_SOLID, proto.CH_SOLID,
                 duty_g=cfg.get("duty_g", 255),
@@ -706,7 +683,7 @@ def main() -> None:
             _run_once(link, cfg, cfg_path)
 
         except ConnectionError:
-            log.warning("硬件断开，等待重连...")
+            log.warning("Hardware disconnected, waiting to reconnect...")
             _write_conn_status(False, cfg.get("transport", "serial"))
             if link:
                 try:
@@ -719,7 +696,7 @@ def main() -> None:
             raise
 
         except Exception as e:
-            log.error("致命异常 (%s):\n%s", type(e).__name__, traceback.format_exc())
+            log.error("Fatal error (%s):\n%s", type(e).__name__, traceback.format_exc())
             _write_conn_status(False, cfg.get("transport", "serial"))
             if link:
                 try:

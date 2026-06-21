@@ -257,6 +257,38 @@ class TestDaemon:
 
         assert _record_to_state(record, now=now)["state"] == "idle"
 
+    def test_stale_main_working_without_active_work_becomes_idle_red(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+        import vibecodinglight.daemon as daemon
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+        monkeypatch.setattr(daemon, "STATES_ROOT", str(tmp_path))
+        monkeypatch.setattr(daemon, "ACTIVE_STATE_STALE_S", 30)
+
+        state_dir = tmp_path / "claude"
+        state_dir.mkdir()
+        path = state_dir / "session-1"
+        stale_ts = time.time() - 120
+        path.write_text(json.dumps({
+            "state": "working",
+            "ts": stale_ts,
+            "main_state": "working",
+            "main_ts": stale_ts,
+            "active_tools": {},
+            "active_subagents": {},
+            "alerts": {},
+        }), encoding="utf-8")
+        os.utime(path, (stale_ts, stale_ts))
+
+        states = _read_states("claude")
+        frame, _label, _active = _frame_for_states("mixed", states, {}, load_config())
+        parsed = proto.parse_frame(frame)
+
+        assert states["session-1"]["state"] == "idle"
+        assert parsed is not None
+        assert parsed[3] == proto.CH_OFF
+        assert parsed[5] == proto.CH_SOLID
+
 
 class TestHooks:
     def test_resolve_auto_bash(self):
