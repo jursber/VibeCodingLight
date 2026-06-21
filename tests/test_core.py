@@ -97,7 +97,7 @@ class TestDaemon:
         parsed = proto.parse_frame(f)
         assert parsed is not None
         # Both map to green; model has higher priority
-        assert parsed[3] == proto.CH_BLINK  # green (model wins)
+        assert parsed[3] == proto.CH_BREATH  # green (model wins)
 
     def test_mixed_frame_red_conflict(self):
         cfg = load_config()
