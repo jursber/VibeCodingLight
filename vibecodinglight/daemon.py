@@ -193,6 +193,7 @@ def _pick_highest(states: dict[str, dict]) -> str:
             has_alert = True
             if ts > newest_alert_ts:
                 newest_alert_ts = ts
+            continue  # alert 不参与 best_non_alert 计算
         if p < best_non_alert_p or (p == best_non_alert_p and ts > best_non_alert_ts):
             best_non_alert = s
             best_non_alert_p = p

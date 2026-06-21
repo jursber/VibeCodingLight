@@ -1,5 +1,6 @@
 """核心功能测试。"""
 
+import time
 import pytest
 from vibecodinglight import protocol as proto
 from vibecodinglight.daemon import _pick_highest, _mixed_frame, _state_to_frame
@@ -67,10 +68,38 @@ class TestDaemon:
         assert _pick_highest({"s1": {"state": "thinking"}}) == "thinking"
 
     def test_pick_highest_priority(self):
+        now = time.time()
         states = {
-            "s1": {"state": "thinking"},
-            "s2": {"state": "alert"},
-            "s3": {"state": "working"},
+            "s1": {"state": "thinking", "ts": now},
+            "s2": {"state": "alert", "ts": now},
+            "s3": {"state": "working", "ts": now},
+        }
+        assert _pick_highest(states) == "alert"
+
+    def test_stale_alert_downgrades(self):
+        """alert 超过 5 秒且有更新的非 alert 状态时，自动降级。"""
+        now = time.time()
+        states = {
+            "s1": {"state": "alert", "ts": now - 10},    # 10 秒前的 alert
+            "s2": {"state": "working", "ts": now - 2},   # 2 秒前的 working
+        }
+        assert _pick_highest(states) == "working"
+
+    def test_fresh_alert_wins(self):
+        """alert 未过期时仍然优先。"""
+        now = time.time()
+        states = {
+            "s1": {"state": "alert", "ts": now - 2},     # 2 秒前的 alert
+            "s2": {"state": "working", "ts": now - 1},   # 1 秒前的 working
+        }
+        assert _pick_highest(states) == "alert"
+
+    def test_stale_alert_no_newer_state(self):
+        """alert 过期但没有更新的非 alert 状态时，仍然显示 alert。"""
+        now = time.time()
+        states = {
+            "s1": {"state": "alert", "ts": now - 10},
+            "s2": {"state": "working", "ts": now - 15},  # working 更旧
         }
         assert _pick_highest(states) == "alert"
 
