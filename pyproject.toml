@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "vibecodinglight"
+version = "1.0.0"
+description = "AI 编程状态灯控系统 — 将 Claude Code / Codex 状态映射到物理交通灯"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+    "bleak>=0.20",
+]
+
+[project.scripts]
+vibectl = "vibecodinglight.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vibecodinglight*"]

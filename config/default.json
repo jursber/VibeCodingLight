@@ -1,0 +1,10 @@
+{
+  "mode": "claude",
+  "serial_port": "auto",
+  "transport": "serial",
+  "duty_g": 255,
+  "duty_y": 255,
+  "duty_r": 255,
+  "blink_period_ms": 800,
+  "breath_period_ms": 3000
+}
