@@ -156,7 +156,7 @@ class TestConfigValidation:
     def test_invalid_mode_falls_back(self):
         cfg = {"mode": "invalid"}
         result = _validate_config(cfg)
-        assert result["mode"] == "claude"
+        assert result["mode"] == "mixed"
 
     def test_invalid_transport_falls_back(self):
         cfg = {"transport": "wifi"}

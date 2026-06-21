@@ -47,7 +47,7 @@ CONN_STATUS_FILE = os.path.join(_TEMP_DIR, "vibe_conn_status.json")
 
 # ── 默认配置 ──────────────────────────────────────────────
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "mode": "claude",
+    "mode": "mixed",
     "serial_port": "auto",
     "transport": "serial",
     "duty_g": 255,

@@ -191,13 +191,40 @@ def cmd_setup() -> None:
 
 def cmd_install() -> None:
     """安装 hooks + 开机自启。"""
-    from .config import load_config
+    from .config import load_config, save_config
     cfg = load_config()
-    mode = cfg.get("mode", "claude")
+    mode = cfg.get("mode", "mixed")
+
+    # 检测 Claude 和 Codex 是否安装
+    claude_installed = os.path.isdir(os.path.expanduser("~/.claude"))
+    codex_installed = os.path.isdir(os.path.expanduser("~/.codex"))
+
+    _print("环境检测:")
+    _print(f"  Claude Code: {'已安装' if claude_installed else '未检测到'}")
+    _print(f"  OpenAI Codex: {'已安装' if codex_installed else '未检测到'}")
+    _print()
+
+    # 如果是混合模式但某个未安装，降级并告知
+    if mode == "mixed":
+        if not claude_installed and not codex_installed:
+            _print("错误: Claude Code 和 Codex 均未检测到，无法安装 hooks。")
+            return
+        if not codex_installed:
+            _print("未检测到 Codex，自动切换为 Claude 独占模式。")
+            mode = "claude"
+            cfg["mode"] = mode
+            save_config(cfg)
+        elif not claude_installed:
+            _print("未检测到 Claude Code，自动切换为 Codex 独占模式。")
+            mode = "codex"
+            cfg["mode"] = mode
+            save_config(cfg)
 
     _install_hooks(mode)
     _install_autostart()
-    _print("安装完成。")
+    _print()
+    _print(f"安装完成。当前模式: {mode}")
+    _print("请重启 Claude Code / Codex 以加载 hooks。")
 
 
 def cmd_uninstall() -> None:
