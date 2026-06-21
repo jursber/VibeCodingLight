@@ -468,7 +468,7 @@ def _startup_folder() -> str:
 
 
 def _install_autostart() -> None:
-    """在 Windows 启动文件夹创建快捷方式。"""
+    """在 Windows 启动文件夹创建 watchdog 脚本（每 30 秒检查，挂了自动重启）。"""
     if sys.platform != "win32":
         _print("开机自启仅支持 Windows")
         return
@@ -476,20 +476,61 @@ def _install_autostart() -> None:
     startup = _startup_folder()
     shortcut_path = os.path.join(startup, "VibeCodingLight.vbs")
 
-    # 用 VBS 启动 pythonw，无控制台窗口
-    exe = sys.executable
+    # daemon 启动命令
     if getattr(sys, "frozen", False):
-        cmd = f'"{exe}" daemon'
+        daemon_cmd = f'"{sys.executable}" daemon'
     else:
-        pythonw = shutil.which("pythonw") or exe
-        cmd = f'"{pythonw}" -m vibecodinglight daemon'
+        pythonw = shutil.which("pythonw") or sys.executable
+        daemon_cmd = f'"{pythonw}" -m vibecodinglight daemon'
 
-    # VBS 字符串中转义双引号
-    cmd_escaped = cmd.replace('"', '""')
-    vbs = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{cmd_escaped}", 0, False\n'
+    # 状态检查命令（用 python 运行 inline 脚本检查 PID）
+    check_python = shutil.which("pythonw") or shutil.which("python") or sys.executable
+    check_python_escaped = check_python.replace('"', '""')
+    daemon_cmd_escaped = daemon_cmd.replace('"', '""')
+
+    # Watchdog VBS：每 30 秒检查一次，daemon 挂了自动重启
+    vbs = f'''Set fso = CreateObject("Scripting.FileSystemObject")
+Set WshShell = CreateObject("WScript.Shell")
+tempDir = WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\\Temp"
+pidFile = tempDir & "\\vibe_daemon.pid"
+lockFile = tempDir & "\\vibe_daemon.lock"
+
+Function IsDaemonRunning()
+    IsDaemonRunning = False
+    If Not fso.FileExists(pidFile) Then Exit Function
+    Set f = fso.OpenTextFile(pidFile, 1)
+    If f.AtEndOfStream Then f.Close: Exit Function
+    pid = Trim(f.ReadAll())
+    f.Close
+    If pid = "" Then Exit Function
+    Set exec = WshShell.Exec("cmd /c tasklist /FI ""PID eq " & pid & """ /NH")
+    output = ""
+    Do While Not exec.StdOut.AtEndOfStream
+        output = output & exec.StdOut.ReadLine()
+    Loop
+    IsDaemonRunning = (InStr(output, pid) > 0 And InStr(output, "python") > 0)
+End Function
+
+' 首次启动
+If Not IsDaemonRunning() Then
+    If fso.FileExists(lockFile) Then fso.DeleteFile lockFile, True
+    WshShell.Run "{daemon_cmd_escaped}", 0, False
+    WScript.Sleep 3000
+End If
+
+' Watchdog 循环：每 30 秒检查一次
+Do
+    WScript.Sleep 30000
+    If Not IsDaemonRunning() Then
+        If fso.FileExists(lockFile) Then fso.DeleteFile lockFile, True
+        WshShell.Run "{daemon_cmd_escaped}", 0, False
+        WScript.Sleep 3000
+    End If
+Loop
+'''
     with open(shortcut_path, "w", encoding="utf-8") as f:
         f.write(vbs)
-    _print(f"已创建开机自启: {shortcut_path}")
+    _print(f"已创建开机自启 (watchdog): {shortcut_path}")
 
 
 def _uninstall_autostart() -> None:
