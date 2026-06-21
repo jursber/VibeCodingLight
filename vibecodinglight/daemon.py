@@ -43,6 +43,7 @@ ACTIVE_STATE_TTL = 300        # 5 分钟
 STATE_FILE_TTL = 1800         # 30 分钟
 MIN_ACTIVE_HOLD_S = 0.5       # 最短显示时间
 INACTIVITY_TIMEOUT_S = 1800   # 30 分钟无活动自动熄灯
+ALERT_STALE_S = 5.0           # alert 超过此秒数后，如果有更新的非 alert 状态则降级
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working"}
 CONN_STATUS_TTL = 6.0
 
@@ -159,7 +160,7 @@ def _read_states(agent: str) -> dict[str, dict]:
                 continue
 
             if state in PRIORITY:
-                states[name] = {"state": state, "is_subagent": is_sub}
+                states[name] = {"state": state, "is_subagent": is_sub, "ts": ts}
         except (OSError, json.JSONDecodeError):
             continue
 
@@ -167,18 +168,46 @@ def _read_states(agent: str) -> dict[str, dict]:
 
 
 def _pick_highest(states: dict[str, dict]) -> str:
-    """从状态集合中选出最高优先级的状态名。"""
+    """从状态集合中选出最高优先级的状态名。
+
+    特殊规则：alert 超过 ALERT_STALE_S 秒后，如果有更新的非 alert 状态则降级。
+    解决问题：PermissionRequest 写入 alert 后，用户批准了操作但红灯一直闪。
+    """
     if not states:
         return "off"
-    best = "off"
-    best_p = 99
+
+    now = time.time()
+
+    # 找到最高优先级的非 alert 状态及其时间
+    best_non_alert = "off"
+    best_non_alert_p = 99
+    best_non_alert_ts = 0.0
+    has_alert = False
+    newest_alert_ts = 0.0
+
     for entry in states.values():
         s = entry.get("state", "off")
+        ts = entry.get("ts", 0)
         p = PRIORITY.get(s, 99)
-        if p < best_p:
-            best_p = p
-            best = s
-    return best
+        if s == "alert":
+            has_alert = True
+            if ts > newest_alert_ts:
+                newest_alert_ts = ts
+        if p < best_non_alert_p or (p == best_non_alert_p and ts > best_non_alert_ts):
+            best_non_alert = s
+            best_non_alert_p = p
+            best_non_alert_ts = ts
+
+    # 如果有 alert，检查是否过期
+    if has_alert:
+        alert_age = now - newest_alert_ts
+        if alert_age > ALERT_STALE_S:
+            # alert 过期，如果有更新的非 alert 状态则使用它
+            if best_non_alert != "off" and best_non_alert_ts > newest_alert_ts:
+                return best_non_alert
+        return "alert"
+
+    return best_non_alert
 
 
 # ── 状态 → 帧映射 ────────────────────────────────────────
