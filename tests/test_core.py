@@ -11,6 +11,7 @@ from vibecodinglight.daemon import (
     _state_to_frame,
     _frame_for_states,
     _record_to_state,
+    _read_states,
 )
 from vibecodinglight.hooks import _apply_event_state, _read_current_state, _resolve_state
 from vibecodinglight.config import PRIORITY, load_config, _validate_config
@@ -162,6 +163,47 @@ class TestDaemon:
         assert parsed[4] == proto.CH_BREATH   # Claude thinking -> yellow breath
         assert parsed[5] == proto.CH_OFF
         assert label == "claude:thinking,codex:working"
+        assert active is True
+
+    def test_frame_for_states_mixed_preserves_idle_and_working_within_same_agent(self):
+        cfg = load_config()
+        now = time.time()
+        frame, label, active = _frame_for_states(
+            "mixed",
+            {
+                "claude-waiting": {"state": "idle", "ts": now - 2},
+                "claude-working": {"state": "working", "ts": now},
+            },
+            {},
+            cfg,
+        )
+
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[3] == proto.CH_SOLID  # working session keeps green on
+        assert parsed[5] == proto.CH_SOLID  # idle session independently keeps red on
+        assert label == "claude:idle+working,codex:off"
+        assert active is True
+
+    def test_frame_for_states_mixed_clears_session_idle_after_new_prompt(self):
+        cfg = load_config()
+        now = time.time()
+        frame, label, active = _frame_for_states(
+            "mixed",
+            {
+                "claude-same-session": {"state": "thinking", "ts": now},
+            },
+            {},
+            cfg,
+        )
+
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[4] == proto.CH_BREATH  # new prompt shows thinking
+        assert parsed[5] == proto.CH_OFF     # prior idle for this session is gone
+        assert label == "claude:thinking,codex:off"
         assert active is True
 
     def test_record_to_state_parallel_tools_stays_model_until_all_finish(self):
@@ -386,6 +428,45 @@ class TestHooks:
         assert data["state"] == "thinking"
         assert data["active_tools"] == {}
 
+    def test_user_prompt_globally_acknowledges_prior_idle_red(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state("claude", "window-a", "Stop", "idle", {})
+        _apply_event_state("claude", "window-b", "Stop", "idle", {})
+        time.sleep(0.01)
+        _apply_event_state("claude", "window-a", "UserPromptSubmit", "thinking", {"prompt": "next"})
+
+        states = _read_states("claude")
+        frame, label, _active = _frame_for_states("mixed", states, {}, load_config())
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[4] == proto.CH_BREATH
+        assert parsed[5] == proto.CH_OFF
+        assert label == "claude:thinking,codex:off"
+
+    def test_stop_after_user_prompt_restarts_idle_red_cycle(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state("claude", "window-a", "Stop", "idle", {})
+        time.sleep(0.01)
+        _apply_event_state("claude", "window-a", "UserPromptSubmit", "thinking", {"prompt": "next"})
+        time.sleep(0.01)
+        _apply_event_state("claude", "window-b", "Stop", "idle", {})
+
+        states = _read_states("claude")
+        frame, label, _active = _frame_for_states("mixed", states, {}, load_config())
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[4] == proto.CH_BREATH
+        assert parsed[5] == proto.CH_SOLID
+        assert label == "claude:idle+thinking,codex:off"
+
     def test_apply_event_state_ignores_late_post_tool_after_stop(self, tmp_path, monkeypatch):
         import vibecodinglight.config as config
 
@@ -410,6 +491,31 @@ class TestHooks:
 
         assert data["state"] == "idle"
         assert data["active_tools"] == {}
+
+    def test_apply_event_state_ignores_late_subagent_stop_after_stop(self, tmp_path, monkeypatch):
+        import vibecodinglight.config as config
+
+        monkeypatch.setattr(config, "STATES_ROOT", str(tmp_path))
+
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "SubagentStart",
+            "thinking",
+            {"agent_id": "sub-1"},
+        )
+        _apply_event_state("codex", "session-1", "Stop", "idle", {})
+        _apply_event_state(
+            "codex",
+            "session-1",
+            "SubagentStop",
+            "working",
+            {"agent_id": "sub-1"},
+        )
+        data = _read_current_state("codex", "session-1")
+
+        assert data["state"] == "idle"
+        assert data["active_subagents"] == {}
 
     def test_resolve_state_ignores_vibecodinglight_self_commands(self):
         assert _resolve_state(

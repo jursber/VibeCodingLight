@@ -20,7 +20,7 @@ import time
 import traceback
 
 from .config import (
-    ACTIVE_STATES, CONN_STATUS_FILE, LOCK_FILE, LOG_FILE,
+    ACTIVE_STATES, CONN_STATUS_FILE, IDLE_ACK_FILE, LOCK_FILE, LOG_FILE,
     PID_FILE, PRIORITY, STATES_ROOT, state_dir_for, load_config,
     detect_port,
 )
@@ -72,11 +72,21 @@ def _write_conn_status(connected: bool, transport: str = "", port: str = "") -> 
 
 
 # ── 状态文件读取 ──────────────────────────────────────────
+def _read_idle_ack_ts() -> float:
+    try:
+        with open(IDLE_ACK_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return float(data.get("ts") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0.0
+
+
 def _read_states(agent: str) -> dict[str, dict]:
     """读取某个 agent 的所有 session 状态。"""
     d = state_dir_for(agent)
     states: dict[str, dict] = {}
     now = time.time()
+    idle_ack_ts = _read_idle_ack_ts()
 
     try:
         files = os.listdir(d)
@@ -173,6 +183,9 @@ def _read_states(agent: str) -> dict[str, dict]:
                     os.remove(path)
                 except OSError:
                     pass
+                continue
+
+            if state == "idle" and ts <= idle_ack_ts:
                 continue
 
             if state in PRIORITY or state == "stale":
@@ -398,14 +411,85 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
     )
 
 
+def _state_summary(states: dict[str, dict]) -> str:
+    if not states:
+        return "off"
+    names = sorted({str(item.get("state", "off")) for item in states.values()})
+    return "+".join(names) if names else "off"
+
+
+def _mixed_frame_from_entries(claude_states: dict[str, dict],
+                              codex_states: dict[str, dict], cfg: dict) -> bytes:
+    bp = cfg.get("blink_period_ms", 800)
+    brp = cfg.get("breath_period_ms", 3000)
+    dg = cfg.get("duty_g", 255)
+    dy = cfg.get("duty_y", 255)
+    dr = cfg.get("duty_r", 255)
+
+    modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
+    dutys = [0, 0, 0]
+
+    channel_priority = {
+        "red": {
+            proto.CH_BLINK: PRIORITY["alert"],
+            proto.CH_SOLID: PRIORITY["idle"],
+        },
+        "yellow": {
+            proto.CH_BREATH: PRIORITY["thinking"],
+        },
+        "green": {
+            proto.CH_BREATH: PRIORITY["model"],
+            proto.CH_SOLID: PRIORITY["working"],
+            proto.CH_BLINK: PRIORITY["stale"],
+        },
+    }
+    ch_idx = {"green": 0, "yellow": 1, "red": 2}
+
+    def _candidate(state: str):
+        if state == "alert":
+            return "red", proto.CH_BLINK, dr
+        if state == "idle":
+            return "red", proto.CH_SOLID, dr
+        if state == "thinking":
+            return "yellow", proto.CH_BREATH, dy
+        if state == "model":
+            return "green", proto.CH_BREATH, dg
+        if state == "working":
+            return "green", proto.CH_SOLID, dg
+        if state == "stale":
+            return "green", proto.CH_BLINK, dg
+        return None
+
+    for entry in list(claude_states.values()) + list(codex_states.values()):
+        item = _candidate(str(entry.get("state", "off")))
+        if item is None:
+            continue
+        ch, mode, duty = item
+        idx = ch_idx[ch]
+        current = modes[idx]
+        current_p = channel_priority.get(ch, {}).get(current, 99)
+        next_p = channel_priority.get(ch, {}).get(mode, 99)
+        if current == proto.CH_OFF or next_p < current_p:
+            modes[idx] = mode
+            dutys[idx] = duty
+
+    if all(m == proto.CH_OFF for m in modes):
+        modes[2] = proto.CH_SOLID
+        dutys[2] = dr
+
+    return proto.build_set_multi(
+        modes[0], modes[1], modes[2],
+        duty_g=dutys[0], duty_y=dutys[1], duty_r=dutys[2],
+        blink_period=bp, breath_period=brp,
+    )
+
+
 def _frame_for_states(mode: str, claude_states: dict[str, dict],
                       codex_states: dict[str, dict], cfg: dict) -> tuple[bytes, str, bool]:
     """根据模式和状态集合生成硬件帧、日志标签和是否有活动 session。"""
     if mode == "mixed":
-        claude_state = _pick_highest(claude_states)
-        codex_state = _pick_highest(codex_states)
-        label = f"claude:{claude_state},codex:{codex_state}"
-        return _mixed_frame(claude_state, codex_state, cfg), label, bool(claude_states or codex_states)
+        label = f"claude:{_state_summary(claude_states)},codex:{_state_summary(codex_states)}"
+        return _mixed_frame_from_entries(claude_states, codex_states, cfg), label, bool(claude_states or codex_states)
 
     states = codex_states if mode == "codex" else claude_states
     best_state = _pick_highest(states)

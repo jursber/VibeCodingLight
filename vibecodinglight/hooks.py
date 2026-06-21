@@ -15,7 +15,7 @@ import time
 import threading
 from typing import Any
 
-from .config import PRIORITY, STATES_ROOT, state_dir_for
+from .config import IDLE_ACK_FILE, PRIORITY, STATES_ROOT, state_dir_for
 
 STDIN_TIMEOUT = 0.2  # 秒
 RECENT_EVENTS_LIMIT = 20
@@ -94,6 +94,19 @@ def _write_state_record(agent: str, session_id: str, data: dict[str, Any]) -> No
         except OSError:
             pass
     os.replace(tmp, path)
+
+
+def _ack_idle(now: float) -> None:
+    os.makedirs(os.path.dirname(IDLE_ACK_FILE), exist_ok=True)
+    tmp = IDLE_ACK_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": now}, f)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, IDLE_ACK_FILE)
 
 
 def _delete_state(agent: str, session_id: str) -> None:
@@ -207,7 +220,9 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
     now = time.time()
     record = _normalize_record(_read_current_state(agent, session_id), state, now)
 
-    if event in TOOL_END_EVENTS and record.get("updated_by") in ("Stop", "SessionEnd"):
+    if (
+        event in TOOL_END_EVENTS or event in SUBAGENT_END_EVENTS
+    ) and record.get("updated_by") in ("Stop", "SessionEnd"):
         _append_recent_event(record, event, str(record.get("state") or "idle"), stdin_data, now)
         _write_state_record(agent, session_id, record)
         return
@@ -218,6 +233,9 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
 
     if event in ALERT_CLEAR_EVENTS:
         record["alerts"] = {}
+
+    if event == "UserPromptSubmit":
+        _ack_idle(now)
 
     if event in TOOL_START_EVENTS:
         tool_id, has_stable_id = _tool_event_id(stdin_data)

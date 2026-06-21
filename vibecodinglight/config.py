@@ -41,6 +41,7 @@ _TEMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp")
 
 CONFIG_PATH = os.path.join(_APP_DIR, "config.json")
 STATES_ROOT = os.path.join(_TEMP_DIR, "vibe_states")
+IDLE_ACK_FILE = os.path.join(STATES_ROOT, "_idle_ack")
 PID_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.pid")
 LOCK_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.lock")
 LOG_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.log")
