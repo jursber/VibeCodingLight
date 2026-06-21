@@ -42,6 +42,7 @@ ERROR_RETRY_INTERVAL = 1
 ACTIVE_STATE_TTL = 300        # 5 分钟
 STATE_FILE_TTL = 1800         # 30 分钟
 MIN_ACTIVE_HOLD_S = 0.5       # 最短显示时间
+INACTIVITY_TIMEOUT_S = 1800   # 30 分钟无活动自动熄灯
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working"}
 CONN_STATUS_TTL = 6.0
 
@@ -333,6 +334,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
     last_frame = None
     last_state = "off"
     last_switch = 0.0
+    last_activity = time.time()  # 最后一次有活动状态的时间
 
     mode = cfg.get("mode", "claude")
 
@@ -353,6 +355,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 pass
 
             # 读取状态
+            has_active_sessions = False
             if mode == "mixed":
                 claude_states = _read_states("claude")
                 codex_states = _read_states("codex")
@@ -360,11 +363,22 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 codex_best = _pick_highest(codex_states)
                 best_state = min(claude_best, codex_best,
                                  key=lambda s: PRIORITY.get(s, 99))
+                has_active_sessions = bool(claude_states or codex_states)
                 frame = _mixed_frame(claude_best, codex_best, cfg)
             else:
                 states = _read_states(mode)
                 best_state = _pick_highest(states)
+                has_active_sessions = bool(states)
                 frame = _state_to_frame(best_state, cfg)
+
+            # 有非 off/idle 的活动状态时更新最后活动时间
+            if has_active_sessions and best_state not in ("off", "idle"):
+                last_activity = now
+
+            # 30 分钟无活动 → 熄灯
+            if (now - last_activity) > INACTIVITY_TIMEOUT_S:
+                frame = proto.build_off()
+                best_state = "off"
 
             # 最短显示时间保护
             if (
@@ -449,6 +463,16 @@ def main() -> None:
             port = find_esp32_port() if transport == "serial" else ""
             _write_conn_status(True, transport, port or "")
             log.info("硬件已连接 (transport=%s)", transport)
+
+            # 启动动画：全亮 2 秒
+            boot_frame = proto.build_set_multi(
+                proto.CH_SOLID, proto.CH_SOLID, proto.CH_SOLID,
+                duty_g=cfg.get("duty_g", 255),
+                duty_y=cfg.get("duty_y", 255),
+                duty_r=cfg.get("duty_r", 255),
+            )
+            link.send_raw(boot_frame, wait=True)
+            time.sleep(2)
 
             _run_once(link, cfg, cfg_path)
 

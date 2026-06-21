@@ -127,7 +127,11 @@ def main_set_state() -> None:
     agent: claude / codex
     state_hint: thinking / working / alert / idle / off / auto
     """
+    # cli.py 调用时 sys.argv[1] 是 "set-state"，需要跳过
     args = sys.argv[1:]
+    if args and args[0] == "set-state":
+        args = args[1:]
+
     if len(args) < 2:
         sys.exit(1)
 
@@ -217,7 +221,10 @@ def main_set_alert() -> None:
 
     写入 alert 状态，然后输出 defer JSON 让 IDE 继续显示权限弹窗。
     """
+    # cli.py 调用时 sys.argv[1] 是 "set-alert"，需要跳过
     args = sys.argv[1:]
+    if args and args[0] == "set-alert":
+        args = args[1:]
     agent = (args[0] if args else "claude").lower().strip()
     if agent not in ("claude", "codex"):
         agent = "claude"
