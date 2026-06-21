@@ -150,16 +150,13 @@ def main_set_state() -> None:
     session_id = (stdin_data.get("session_id") or
                   stdin_data.get("conversation_id") or "").strip()
 
-    # 检查是否是子代理触发
+    # 子代理过滤：agent_id 存在表示这是子代理触发的 hook，一律忽略。
+    # 子代理的工具调用/生命周期对用户来说是后台噪音，不应影响灯效。
+    # 只有主代理的 hook（没有 agent_id）才写入状态。
     agent_id = stdin_data.get("agent_id")
     is_subagent = bool(agent_id)
-
-    # 子代理过滤：如果主代理已停止，忽略子代理残留事件
-    if is_subagent and session_id:
-        current = _read_current_state(agent, session_id)
-        if current and current.get("state") == "idle":
-            # 主代理已 Stop，忽略子代理的残留事件
-            sys.exit(0)
+    if is_subagent:
+        sys.exit(0)
 
     # 确定最终状态
     state = _resolve_state(event, state_hint, stdin_data)
@@ -233,14 +230,11 @@ def main_set_alert() -> None:
     session_id = (stdin_data.get("session_id") or
                   stdin_data.get("conversation_id") or "").strip()
 
+    # 子代理过滤：同 set-state，忽略所有子代理 hook
     agent_id = stdin_data.get("agent_id")
     is_subagent = bool(agent_id)
-
-    # 子代理过滤
-    if is_subagent and session_id:
-        current = _read_current_state(agent, session_id)
-        if current and current.get("state") == "idle":
-            sys.exit(0)
+    if is_subagent:
+        sys.exit(0)
 
     if session_id and os.sep not in session_id and "/" not in session_id:
         _write_state(agent, session_id, "alert", is_subagent=is_subagent)
