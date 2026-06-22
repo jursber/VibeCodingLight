@@ -358,32 +358,35 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
             return "green", proto.CH_BLINK, dg
         return "off", proto.CH_OFF, 0
 
-    c_ch, c_mode, c_duty = _channel_map(claude_state)
-    x_ch, x_mode, x_duty = _channel_map(codex_state)
-
-    # Start with all channels off.
     modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
     dutys = [0, 0, 0]
-
     ch_idx = {"green": 0, "yellow": 1, "red": 2}
 
-    if c_ch != "off":
-        idx = ch_idx[c_ch]
-        modes[idx] = c_mode
-        dutys[idx] = c_duty
+    best_red = None
+    best_red_p = 99
+    best_non_red = None
+    best_non_red_p = 99
 
-    # Add Codex state, resolving same-channel conflicts by priority.
-    if x_ch != "off":
-        idx = ch_idx[x_ch]
-        if modes[idx] == proto.CH_OFF:
-            modes[idx] = x_mode
-            dutys[idx] = x_duty
-        else:
-            c_p = PRIORITY.get(claude_state, 4.5 if claude_state == "stale" else 99)
-            x_p = PRIORITY.get(codex_state, 4.5 if codex_state == "stale" else 99)
-            if x_p < c_p:
-                modes[idx] = x_mode
-                dutys[idx] = x_duty
+    for state in (claude_state, codex_state):
+        ch, mode, duty = _channel_map(state)
+        if ch == "off":
+            continue
+        p = PRIORITY.get(state, 4.5 if state == "stale" else 99)
+        if ch == "red":
+            if p < best_red_p:
+                best_red = (ch, mode, duty)
+                best_red_p = p
+        elif p < best_non_red_p:
+            best_non_red = (ch, mode, duty)
+            best_non_red_p = p
+
+    for item in (best_red, best_non_red):
+        if item is None:
+            continue
+        ch, mode, duty = item
+        idx = ch_idx[ch]
+        modes[idx] = mode
+        dutys[idx] = duty
 
     if all(m == proto.CH_OFF for m in modes):
         modes[2] = proto.CH_SOLID
@@ -414,20 +417,6 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
     modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
     dutys = [0, 0, 0]
 
-    channel_priority = {
-        "red": {
-            proto.CH_BLINK: PRIORITY["alert"],
-            proto.CH_SOLID: PRIORITY["idle"],
-        },
-        "yellow": {
-            proto.CH_BREATH: PRIORITY["thinking"],
-        },
-        "green": {
-            proto.CH_BREATH: PRIORITY["model"],
-            proto.CH_SOLID: PRIORITY["working"],
-            proto.CH_BLINK: PRIORITY["stale"],
-        },
-    }
     ch_idx = {"green": 0, "yellow": 1, "red": 2}
 
     def _candidate(state: str):
@@ -445,18 +434,42 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
             return "green", proto.CH_BLINK, dg
         return None
 
+    best_red = None
+    best_red_p = 99
+    best_red_ts = 0.0
+    best_non_red = None
+    best_non_red_p = 99
+    best_non_red_ts = 0.0
+
     for entry in list(claude_states.values()) + list(codex_states.values()):
-        item = _candidate(str(entry.get("state", "off")))
+        state = str(entry.get("state", "off"))
+        item = _candidate(state)
+        if item is None:
+            continue
+        ch, mode, duty = item
+        p = PRIORITY.get(state, 4.5 if state == "stale" else 99)
+        try:
+            ts = float(entry.get("ts", 0))
+        except (TypeError, ValueError):
+            ts = 0.0
+
+        if ch == "red":
+            if p < best_red_p or (p == best_red_p and ts > best_red_ts):
+                best_red = (ch, mode, duty)
+                best_red_p = p
+                best_red_ts = ts
+        elif p < best_non_red_p or (p == best_non_red_p and ts > best_non_red_ts):
+            best_non_red = (ch, mode, duty)
+            best_non_red_p = p
+            best_non_red_ts = ts
+
+    for item in (best_red, best_non_red):
         if item is None:
             continue
         ch, mode, duty = item
         idx = ch_idx[ch]
-        current = modes[idx]
-        current_p = channel_priority.get(ch, {}).get(current, 99)
-        next_p = channel_priority.get(ch, {}).get(mode, 99)
-        if current == proto.CH_OFF or next_p < current_p:
-            modes[idx] = mode
-            dutys[idx] = duty
+        modes[idx] = mode
+        dutys[idx] = duty
 
     if all(m == proto.CH_OFF for m in modes):
         modes[2] = proto.CH_SOLID

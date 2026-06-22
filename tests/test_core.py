@@ -121,13 +121,13 @@ class TestDaemon:
             assert len(f) == 16
             assert f[0:2] == proto.MAGIC
 
-    def test_mixed_frame_different_channels(self):
+    def test_mixed_frame_non_red_channels_are_mutually_exclusive(self):
         cfg = load_config()
         f = _mixed_frame("thinking", "working", cfg)
         parsed = proto.parse_frame(f)
         assert parsed is not None
         # thinking → yellow breath, working → green solid
-        assert parsed[3] == proto.CH_SOLID  # green (working)
+        assert parsed[3] == proto.CH_OFF
         assert parsed[4] == proto.CH_BREATH  # yellow (thinking)
         assert parsed[5] == proto.CH_OFF  # red
 
@@ -147,7 +147,7 @@ class TestDaemon:
         # Both map to red; alert has higher priority
         assert parsed[5] == proto.CH_BLINK  # red (alert wins)
 
-    def test_frame_for_states_mixed_preserves_two_agents(self):
+    def test_frame_for_states_mixed_uses_priority_for_non_red_agents(self):
         cfg = load_config()
         now = time.time()
         frame, label, active = _frame_for_states(
@@ -160,8 +160,8 @@ class TestDaemon:
         parsed = proto.parse_frame(frame)
 
         assert parsed is not None
-        assert parsed[3] == proto.CH_SOLID    # Codex working -> green solid
-        assert parsed[4] == proto.CH_BREATH   # Claude thinking -> yellow breath
+        assert parsed[3] == proto.CH_OFF
+        assert parsed[4] == proto.CH_BREATH   # Claude thinking outranks Codex working
         assert parsed[5] == proto.CH_OFF
         assert label == "claude:thinking,codex:working"
         assert active is True
