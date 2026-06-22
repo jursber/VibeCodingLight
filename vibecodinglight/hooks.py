@@ -122,6 +122,34 @@ def _ack_idle(now: float) -> None:
             pass
 
 
+def _clear_other_active_records(agent: str, current_session_id: str, now: float) -> None:
+    """On a new prompt, downgrade stale active ledgers from other sessions."""
+    try:
+        d = state_dir_for(agent)
+        names = os.listdir(d)
+    except OSError:
+        return
+
+    for name in names:
+        if name == current_session_id or name.endswith(".tmp") or name.startswith("_"):
+            continue
+        data = _read_current_state(agent, name)
+        if not data:
+            continue
+        if not (data.get("active_tools") or data.get("active_subagents") or data.get("alerts")):
+            continue
+        data["state"] = "idle"
+        data["ts"] = now
+        data["main_state"] = "idle"
+        data["main_ts"] = now
+        data["active_tools"] = {}
+        data["active_subagents"] = {}
+        data["alerts"] = {}
+        data["updated_by"] = "UserPromptSubmitCleanup"
+        _append_recent_event(data, "UserPromptSubmitCleanup", "idle", {}, now)
+        _write_state_record(agent, name, data)
+
+
 def _delete_state(agent: str, session_id: str) -> None:
     """删除状态文件（off 状态）。"""
     d = state_dir_for(agent)
@@ -249,6 +277,7 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
 
     if event == "UserPromptSubmit":
         _ack_idle(now)
+        _clear_other_active_records(agent, session_id, now)
 
     if event in TOOL_START_EVENTS:
         tool_id, has_stable_id = _tool_event_id(stdin_data)

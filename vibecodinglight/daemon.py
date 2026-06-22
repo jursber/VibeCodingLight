@@ -49,7 +49,7 @@ ACTIVE_STATE_STALE_S = 30     # Active state file mtime staleness threshold.
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
 CONN_STATUS_TTL = 6.0
 DERIVED_ACTIVE_STALE_S = 45.0
-FALLBACK_TOOL_EXPIRE_S = 300.0
+ACTIVE_TOOL_EXPIRE_S = 300.0
 
 
 # Connection status file
@@ -227,8 +227,7 @@ def _record_to_state(record: dict, now: float | None = None) -> dict:
 
     if active_tools:
         latest = _newest_ts(active_tools) or ts or now
-        has_stable_tool = any(bool(item.get("stable_id", True)) for item in active_tools.values())
-        if not has_stable_tool and now - latest > FALLBACK_TOOL_EXPIRE_S:
+        if now - latest > ACTIVE_TOOL_EXPIRE_S:
             return {"state": "idle", "ts": now, "is_subagent": is_sub}
         if now - latest > DERIVED_ACTIVE_STALE_S:
             return {"state": "stale", "ts": latest, "is_subagent": is_sub}

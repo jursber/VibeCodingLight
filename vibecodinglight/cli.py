@@ -162,18 +162,23 @@ def _format_age(ts) -> str:
 
 
 def _format_state_summary(compact: bool = False) -> str:
+    from .daemon import _record_to_state
+
     records = _iter_state_records()
     if not records:
         return "  无活动 session"
 
     lines: list[str] = []
     for agent, session_id, data in records:
-        state = data.get("state", "unknown")
+        raw_state = data.get("state", "unknown")
+        state = _record_to_state(data).get("state", raw_state)
         active_tools = data.get("active_tools") if isinstance(data.get("active_tools"), dict) else {}
         active_subagents = data.get("active_subagents") if isinstance(data.get("active_subagents"), dict) else {}
         alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+        raw_suffix = f" raw={raw_state}," if raw_state != state else ""
         line = (
             f"  {agent}/{session_id}: {state}, "
+            f"{raw_suffix}"
             f"age={_format_age(data.get('ts'))}, "
             f"tools={len(active_tools)}, subagents={len(active_subagents)}, alerts={len(alerts)}"
         )

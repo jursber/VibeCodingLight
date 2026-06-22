@@ -268,6 +268,26 @@ class TestDaemon:
 
         assert _record_to_state(record, now=now)["state"] == "idle"
 
+    def test_record_to_state_expires_crashed_stable_tool(self):
+        now = time.time()
+        record = {
+            "state": "model",
+            "ts": now - 600,
+            "main_state": "working",
+            "main_ts": now - 600,
+            "active_tools": {
+                "call-stable": {
+                    "state": "model",
+                    "ts": now - 600,
+                    "tool_name": "Bash",
+                    "count": 1,
+                    "stable_id": True,
+                },
+            },
+        }
+
+        assert _record_to_state(record, now=now)["state"] == "idle"
+
     def test_stale_main_working_without_active_work_becomes_idle_red(self, tmp_path, monkeypatch):
         import vibecodinglight.config as config
         import vibecodinglight.daemon as daemon
