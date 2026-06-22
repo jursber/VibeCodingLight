@@ -438,6 +438,11 @@ def _codex_hooks_path() -> str:
 
 
 def _codex_event_key(event: str) -> str:
+    # Codex 现在使用驼峰事件名作为 hooks.json 的标准键名。
+    return str(event)
+
+
+def _legacy_codex_event_key(event: str) -> str:
     chars = []
     for i, ch in enumerate(str(event)):
         if ch.isupper() and i > 0:
@@ -605,10 +610,12 @@ def _write_codex_hooks(hooks) -> None:
                                     "--event", h.event)
 
         event_key = _codex_event_key(h.event)
+        legacy_event_key = _legacy_codex_event_key(h.event)
+        # Codex 读取驼峰事件键；同时清理旧的下划线键，避免残留双写。
         hook_entry = {"type": "command", "command": cmd, "timeout": 10}
         group = {"matcher": "", "hooks": [hook_entry]}
 
-        for key in (h.event, event_key):
+        for key in (h.event, event_key, legacy_event_key):
             if key not in config["hooks"]:
                 continue
             config["hooks"][key] = [
@@ -633,6 +640,8 @@ def _write_codex_hooks(hooks) -> None:
 
 
 def _remove_codex_hooks() -> None:
+    from .hooks_catalog import CODEX_HOOKS
+
     path = _codex_hooks_path()
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -652,6 +661,12 @@ def _remove_codex_hooks() -> None:
         ]
         if len(filtered) != len(original):
             hooks[event] = filtered
+            changed = True
+
+    # Remove legacy snake_case keys that may have been left behind by older installs.
+    for event in list(hooks.keys()):
+        if event in {_legacy_codex_event_key(h.event) for h in CODEX_HOOKS}:
+            del hooks[event]
             changed = True
 
     if changed:
