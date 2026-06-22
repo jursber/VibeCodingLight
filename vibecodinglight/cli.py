@@ -437,6 +437,15 @@ def _codex_hooks_path() -> str:
     return os.path.expanduser("~/.codex/hooks.json")
 
 
+def _codex_event_key(event: str) -> str:
+    chars = []
+    for i, ch in enumerate(str(event)):
+        if ch.isupper() and i > 0:
+            chars.append("_")
+        chars.append(ch.lower())
+    return "".join(chars)
+
+
 def _is_vibe_hook_command(command: str) -> bool:
     text = str(command).replace("\\", "/").lower()
     markers = (
@@ -595,18 +604,23 @@ def _write_codex_hooks(hooks) -> None:
             cmd = _get_hook_command("set-state", "codex", h.state or "auto",
                                     "--event", h.event)
 
+        event_key = _codex_event_key(h.event)
         hook_entry = {"type": "command", "command": cmd, "timeout": 10}
         group = {"matcher": "", "hooks": [hook_entry]}
 
-        if h.event not in config["hooks"]:
-            config["hooks"][h.event] = []
-        config["hooks"][h.event] = [
-            g for g in config["hooks"][h.event]
-            if not (isinstance(g, dict) and
-                    any(_is_vibe_hook_command(str(hk.get("command", "")))
-                        for hk in g.get("hooks", [])))
-        ]
-        config["hooks"][h.event].append(group)
+        for key in (h.event, event_key):
+            if key not in config["hooks"]:
+                continue
+            config["hooks"][key] = [
+                g for g in config["hooks"][key]
+                if not (isinstance(g, dict) and
+                        any(_is_vibe_hook_command(str(hk.get("command", "")))
+                            for hk in g.get("hooks", [])))
+            ]
+            if not config["hooks"][key]:
+                del config["hooks"][key]
+
+        config["hooks"].setdefault(event_key, []).append(group)
 
     tmp = path + ".tmp"
     os.makedirs(os.path.dirname(path), exist_ok=True)

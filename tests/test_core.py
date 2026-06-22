@@ -683,6 +683,37 @@ class TestCliSafety:
 
         assert "sync-runtime" in cli._COMMANDS
 
+    def test_write_codex_hooks_uses_snake_case_event_keys(self, tmp_path, monkeypatch):
+        from vibecodinglight import cli
+
+        hooks_path = tmp_path / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python -m vibecodinglight set-state codex auto --event PreToolUse",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }), encoding="utf-8")
+
+        monkeypatch.setattr(cli, "_codex_hooks_path", lambda: str(hooks_path))
+
+        cli._write_codex_hooks((HookEntry("PreToolUse", True, "auto"),))
+
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+
+        assert "pre_tool_use" in data["hooks"]
+        assert "PreToolUse" not in data["hooks"]
+        command = data["hooks"]["pre_tool_use"][0]["hooks"][0]["command"]
+        assert "--event PreToolUse" in command
+
     def test_legacy_traffic_light_hook_commands_are_treated_as_vibe_hooks(self):
         from vibecodinglight import cli
 

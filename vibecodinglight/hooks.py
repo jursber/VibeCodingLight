@@ -99,14 +99,27 @@ def _write_state_record(agent: str, session_id: str, data: dict[str, Any]) -> No
 def _ack_idle(now: float) -> None:
     os.makedirs(os.path.dirname(IDLE_ACK_FILE), exist_ok=True)
     tmp = IDLE_ACK_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"ts": now}, f)
-        f.flush()
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"ts": now}, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
         try:
-            os.fsync(f.fileno())
+            os.replace(tmp, IDLE_ACK_FILE)
+        except PermissionError:
+            with open(IDLE_ACK_FILE, "w", encoding="utf-8") as f:
+                json.dump({"ts": now}, f)
+                f.flush()
+    except OSError:
+        pass
+    finally:
+        try:
+            os.remove(tmp)
         except OSError:
             pass
-    os.replace(tmp, IDLE_ACK_FILE)
 
 
 def _delete_state(agent: str, session_id: str) -> None:
