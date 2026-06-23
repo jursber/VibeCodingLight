@@ -166,7 +166,7 @@ class TestDaemon:
         assert label == "claude:thinking,codex:working"
         assert active is True
 
-    def test_frame_for_states_mixed_preserves_idle_and_working_within_same_agent(self):
+    def test_frame_for_states_mixed_idle_hidden_when_active_exists(self):
         cfg = load_config()
         now = time.time()
         frame, label, active = _frame_for_states(
@@ -183,8 +183,50 @@ class TestDaemon:
 
         assert parsed is not None
         assert parsed[3] == proto.CH_SOLID  # working session keeps green on
-        assert parsed[5] == proto.CH_SOLID  # idle session independently keeps red on
+        assert parsed[5] == proto.CH_OFF    # idle suppressed when active session exists
         assert label == "claude:idle+working,codex:off"
+        assert active is True
+
+    def test_frame_for_states_mixed_all_idle_shows_red(self):
+        cfg = load_config()
+        now = time.time()
+        frame, label, active = _frame_for_states(
+            "mixed",
+            {
+                "claude-a": {"state": "idle", "ts": now - 5},
+                "claude-b": {"state": "idle", "ts": now - 3},
+            },
+            {},
+            cfg,
+        )
+
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[3] == proto.CH_OFF     # no green
+        assert parsed[5] == proto.CH_SOLID   # all idle -> red solid
+        assert label == "claude:idle,codex:off"
+        assert active is True
+
+    def test_frame_for_states_mixed_alert_still_shows_red_with_active(self):
+        cfg = load_config()
+        now = time.time()
+        frame, label, active = _frame_for_states(
+            "mixed",
+            {
+                "claude-idle": {"state": "idle", "ts": now - 5},
+                "claude-alert": {"state": "alert", "ts": now},
+            },
+            {},
+            cfg,
+        )
+
+        parsed = proto.parse_frame(frame)
+
+        assert parsed is not None
+        assert parsed[3] == proto.CH_OFF     # no green
+        assert parsed[5] == proto.CH_BLINK   # alert still shows red blink
+        assert label == "claude:alert+idle,codex:off"
         assert active is True
 
     def test_frame_for_states_mixed_clears_session_idle_after_new_prompt(self):
@@ -526,8 +568,8 @@ class TestHooks:
         parsed = proto.parse_frame(frame)
 
         assert parsed is not None
-        assert parsed[4] == proto.CH_BREATH
-        assert parsed[5] == proto.CH_SOLID
+        assert parsed[4] == proto.CH_BREATH  # thinking session yellow breath
+        assert parsed[5] == proto.CH_OFF     # idle suppressed when active session exists
         assert label == "claude:idle+thinking,codex:off"
 
     def test_apply_event_state_ignores_late_post_tool_after_stop(self, tmp_path, monkeypatch):

@@ -171,9 +171,12 @@ def _read_states(agent: str) -> dict[str, dict]:
                     file_mtime = os.path.getmtime(path)
                     if now - file_mtime > ACTIVE_STATE_STALE_S:
                         if has_derived_active:
-                            log.info("Session %s/%s state %s stale (mtime %.1fs ago), -> stale",
+                            # 清除过期的 active_tools 和 active_subagents
+                            _cleanup_stale_active_records(path, data, now)
+                            log.info("Session %s/%s state %s stale (mtime %.1fs ago), cleaned up expired active records, -> idle",
                                      agent, name, state, now - file_mtime)
-                            state = "stale"
+                            state = "idle"
+                            ts = now
                         else:
                             log.info("Session %s/%s state %s stale without active work (mtime %.1fs ago), -> idle",
                                      agent, name, state, now - file_mtime)
@@ -199,6 +202,39 @@ def _read_states(agent: str) -> dict[str, dict]:
             continue
 
     return states
+
+
+def _cleanup_stale_active_records(path: str, data: dict, now: float) -> None:
+    """清除状态文件中过期的 active_tools 和 active_subagents 记录。
+
+    当 daemon 检测到 stale 状态时调用此函数，将状态重置为 idle。
+    """
+    if not isinstance(data, dict):
+        return
+
+    # 清除所有 active 记录
+    data["active_tools"] = {}
+    data["active_subagents"] = {}
+    data["alerts"] = {}
+    data["state"] = "idle"
+    data["ts"] = now
+    data["main_state"] = "idle"
+    data["main_ts"] = now
+    data["updated_by"] = "daemon_stale_cleanup"
+
+    # 原子写入
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _newest_ts(entries: dict[str, dict]) -> float:
@@ -361,12 +397,18 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
     dutys = [0, 0, 0]
     ch_idx = {"green": 0, "yellow": 1, "red": 2}
 
+    # 判断是否有活跃状态（非 idle、非 off）
+    has_active = any(s not in ("idle", "off") for s in (claude_state, codex_state))
+
     best_red = None
     best_red_p = 99
     best_non_red = None
     best_non_red_p = 99
 
     for state in (claude_state, codex_state):
+        # 有活跃 session 时，idle 不进入红灯通道
+        if state == "idle" and has_active:
+            continue
         ch, mode, duty = _channel_map(state)
         if ch == "off":
             continue
@@ -433,6 +475,14 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
             return "green", proto.CH_BLINK, dg
         return None
 
+    all_entries = list(claude_states.values()) + list(codex_states.values())
+
+    # 判断是否有活跃 session（非 idle、非 off）
+    has_active = any(
+        str(e.get("state", "off")) not in ("idle", "off")
+        for e in all_entries
+    )
+
     best_red = None
     best_red_p = 99
     best_red_ts = 0.0
@@ -440,8 +490,11 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
     best_non_red_p = 99
     best_non_red_ts = 0.0
 
-    for entry in list(claude_states.values()) + list(codex_states.values()):
+    for entry in all_entries:
         state = str(entry.get("state", "off"))
+        # 有活跃 session 时，idle 不进入红灯通道
+        if state == "idle" and has_active:
+            continue
         item = _candidate(state)
         if item is None:
             continue
