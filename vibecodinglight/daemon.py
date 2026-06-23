@@ -364,38 +364,41 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
     # 判断是否有活跃状态（非 idle、非 off）
     has_active = any(s not in ("idle", "off") for s in (claude_state, codex_state))
 
-    best_red = None
-    best_red_p = 99
+    # 任何时刻只亮一盏灯：alert 优先，其次非红灯最高优先级，最后 idle
+    best_alert = None
+    best_alert_p = 99
     best_non_red = None
     best_non_red_p = 99
+    best_idle = None
 
     for state in (claude_state, codex_state):
-        # 有活跃 session 时，idle 不进入红灯通道
+        # 有活跃 session 时，idle 不参与
         if state == "idle" and has_active:
             continue
         ch, mode, duty = _channel_map(state)
         if ch == "off":
             continue
         p = PRIORITY.get(state, 4.5 if state == "stale" else 99)
-        if ch == "red":
-            if p < best_red_p:
-                best_red = (ch, mode, duty)
-                best_red_p = p
+        if state == "alert":
+            if p < best_alert_p:
+                best_alert = (ch, mode, duty)
+                best_alert_p = p
+        elif ch == "red":
+            best_idle = (ch, mode, duty)
         elif p < best_non_red_p:
             best_non_red = (ch, mode, duty)
             best_non_red_p = p
 
-    for item in (best_red, best_non_red):
-        if item is None:
-            continue
-        ch, mode, duty = item
+    # 只选一盏灯：alert > 非红灯 > idle > 兜底红灯
+    winner = best_alert or best_non_red or best_idle
+    if winner is None:
+        modes[2] = proto.CH_SOLID
+        dutys[2] = dr
+    else:
+        ch, mode, duty = winner
         idx = ch_idx[ch]
         modes[idx] = mode
         dutys[idx] = duty
-
-    if all(m == proto.CH_OFF for m in modes):
-        modes[2] = proto.CH_SOLID
-        dutys[2] = dr
 
     return proto.build_set_multi(
         modes[0], modes[1], modes[2],
@@ -447,16 +450,19 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
         for e in all_entries
     )
 
-    best_red = None
-    best_red_p = 99
-    best_red_ts = 0.0
+    # 任何时刻只亮一盏灯：alert 优先，其次非红灯最高优先级，最后 idle
+    best_alert = None
+    best_alert_p = 99
+    best_alert_ts = 0.0
     best_non_red = None
     best_non_red_p = 99
     best_non_red_ts = 0.0
+    best_idle = None
+    best_idle_ts = 0.0
 
     for entry in all_entries:
         state = str(entry.get("state", "off"))
-        # 有活跃 session 时，idle 不进入红灯通道
+        # 有活跃 session 时，idle 不参与
         if state == "idle" and has_active:
             continue
         item = _candidate(state)
@@ -469,27 +475,31 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
         except (TypeError, ValueError):
             ts = 0.0
 
-        if ch == "red":
-            if p < best_red_p or (p == best_red_p and ts > best_red_ts):
-                best_red = (ch, mode, duty)
-                best_red_p = p
-                best_red_ts = ts
+        if state == "alert":
+            if p < best_alert_p or (p == best_alert_p and ts > best_alert_ts):
+                best_alert = (ch, mode, duty)
+                best_alert_p = p
+                best_alert_ts = ts
+        elif ch == "red":
+            # idle
+            if ts > best_idle_ts:
+                best_idle = (ch, mode, duty)
+                best_idle_ts = ts
         elif p < best_non_red_p or (p == best_non_red_p and ts > best_non_red_ts):
             best_non_red = (ch, mode, duty)
             best_non_red_p = p
             best_non_red_ts = ts
 
-    for item in (best_red, best_non_red):
-        if item is None:
-            continue
-        ch, mode, duty = item
+    # 只选一盏灯：alert > 非红灯 > idle > 兜底红灯
+    winner = best_alert or best_non_red or best_idle
+    if winner is None:
+        modes[2] = proto.CH_SOLID
+        dutys[2] = dr
+    else:
+        ch, mode, duty = winner
         idx = ch_idx[ch]
         modes[idx] = mode
         dutys[idx] = duty
-
-    if all(m == proto.CH_OFF for m in modes):
-        modes[2] = proto.CH_SOLID
-        dutys[2] = dr
 
     return proto.build_set_multi(
         modes[0], modes[1], modes[2],
