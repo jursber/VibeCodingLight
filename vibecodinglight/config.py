@@ -137,8 +137,8 @@ def atomic_write_json(path: str, data: Any, indent: int | None = None) -> None:
 
 
 def is_state_file(name: str) -> bool:
-    """判断文件名是否为有效的状态文件（排除 .tmp 和 _ 前缀）。"""
-    return not name.endswith(".tmp") and not name.startswith("_")
+    """判断文件名是否为有效的状态文件（排除 .tmp、.lock 和 _ 前缀）。"""
+    return not name.endswith(".tmp") and not name.endswith(".lock") and not name.startswith("_")
 
 
 def state_dir_for(agent: str) -> str:

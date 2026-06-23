@@ -125,7 +125,7 @@ def cmd_status() -> None:
 
 
 def _iter_state_records() -> list[tuple[str, str, dict]]:
-    from .config import state_dir_for
+    from .config import state_dir_for, is_state_file
 
     records: list[tuple[str, str, dict]] = []
     for agent in ("claude", "codex"):
@@ -135,7 +135,7 @@ def _iter_state_records() -> list[tuple[str, str, dict]]:
         except OSError:
             continue
         for name in names:
-            if name.endswith(".tmp") or name.startswith("_"):
+            if not is_state_file(name):
                 continue
             path = os.path.join(d, name)
             try:
