@@ -171,12 +171,9 @@ def _read_states(agent: str) -> dict[str, dict]:
                     file_mtime = os.path.getmtime(path)
                     if now - file_mtime > ACTIVE_STATE_STALE_S:
                         if has_derived_active:
-                            # 清除过期的 active_tools 和 active_subagents
-                            _cleanup_stale_active_records(path, data, now)
-                            log.info("Session %s/%s state %s stale (mtime %.1fs ago), cleaned up expired active records, -> idle",
+                            log.info("Session %s/%s state %s stale (mtime %.1fs ago), -> stale",
                                      agent, name, state, now - file_mtime)
-                            state = "idle"
-                            ts = now
+                            state = "stale"
                         else:
                             log.info("Session %s/%s state %s stale without active work (mtime %.1fs ago), -> idle",
                                      agent, name, state, now - file_mtime)
@@ -202,39 +199,6 @@ def _read_states(agent: str) -> dict[str, dict]:
             continue
 
     return states
-
-
-def _cleanup_stale_active_records(path: str, data: dict, now: float) -> None:
-    """清除状态文件中过期的 active_tools 和 active_subagents 记录。
-
-    当 daemon 检测到 stale 状态时调用此函数，将状态重置为 idle。
-    """
-    if not isinstance(data, dict):
-        return
-
-    # 清除所有 active 记录
-    data["active_tools"] = {}
-    data["active_subagents"] = {}
-    data["alerts"] = {}
-    data["state"] = "idle"
-    data["ts"] = now
-    data["main_state"] = "idle"
-    data["main_ts"] = now
-    data["updated_by"] = "daemon_stale_cleanup"
-
-    # 原子写入
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp, path)
-    except OSError:
-        pass
 
 
 def _newest_ts(entries: dict[str, dict]) -> float:
