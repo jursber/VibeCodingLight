@@ -9,13 +9,32 @@ Hook 脚本 — 被 IDE hook 调用，写入状态文件或启动 daemon。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
 import threading
 from typing import Any
 
-from .config import IDLE_ACK_FILE, PRIORITY, STATES_ROOT, state_dir_for
+from .config import IDLE_ACK_FILE, LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, PRIORITY, STATES_ROOT, state_dir_for
+
+# Logging (shared with daemon via same file)
+_log_handler = None
+try:
+    from logging.handlers import RotatingFileHandler
+    os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
+    _log_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+    )
+    _log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+except OSError:
+    pass
+
+log = logging.getLogger("vibe.hooks")
+log.setLevel(logging.INFO)
+if _log_handler and not log.handlers:
+    log.addHandler(_log_handler)
 
 STDIN_TIMEOUT = 0.2  # 秒
 RECENT_EVENTS_LIMIT = 20
@@ -259,6 +278,17 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
     """把一个 hook 事件合并进 session 状态账本。"""
     stdin_data = stdin_data or {}
     now = time.time()
+
+    # 记录 hook 事件
+    sub_id = stdin_data.get("agent_id", "")
+    tool = stdin_data.get("tool_name", "")
+    sid_short = session_id[:8] if session_id else "-"
+    sub_short = str(sub_id)[:8] if sub_id else ""
+    detail = f"tool={tool}" if tool else ""
+    if sub_short:
+        detail = f"sub={sub_short} {detail}".strip()
+    log.info("hook agent=%s session=%s event=%s state=%s %s",
+             agent, sid_short, event, state, detail)
     record = _normalize_record(_read_current_state(agent, session_id), state, now)
 
     if (

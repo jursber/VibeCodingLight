@@ -19,8 +19,11 @@ import sys
 import time
 import traceback
 
+from logging.handlers import RotatingFileHandler
+
 from .config import (
     ACTIVE_STATES, CONN_STATUS_FILE, IDLE_ACK_FILE, LOCK_FILE, LOG_FILE,
+    LOG_MAX_BYTES, LOG_BACKUP_COUNT,
     PID_FILE, PRIORITY, STATES_ROOT, state_dir_for, load_config,
     detect_port,
 )
@@ -32,7 +35,10 @@ os.makedirs(os.path.dirname(LOG_FILE) or ".", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8")],
+    handlers=[RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+    )],
 )
 log = logging.getLogger("vibe.daemon")
 

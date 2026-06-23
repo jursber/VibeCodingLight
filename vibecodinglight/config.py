@@ -45,6 +45,8 @@ IDLE_ACK_FILE = os.path.join(STATES_ROOT, "_idle_ack")
 PID_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.pid")
 LOCK_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.lock")
 LOG_FILE = os.path.join(_TEMP_DIR, "vibe_daemon.log")
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5MB per file
+LOG_BACKUP_COUNT = 3              # keep 3 backups (~20MB total)
 CONN_STATUS_FILE = os.path.join(_TEMP_DIR, "vibe_conn_status.json")
 
 # ── 默认配置 ──────────────────────────────────────────────
