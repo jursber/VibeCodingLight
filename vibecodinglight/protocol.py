@@ -14,7 +14,7 @@ VibeLight 协议 V2 — SET_MULTI 命令，每通道独立模式。
   [12]   duty_g (0-255)
   [13]   duty_y
   [14]   duty_r
-  [15]   crc8 (poly=0x07, init=0, 计算范围 byte[2..14])
+  [15]   crc8 (poly=0x07, init=0, 无反射, 计算范围 byte[2..14])
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ PERIOD_MAX_MS = 60000
 
 
 def crc8(data: bytes) -> int:
-    """CRC-8/ATM：多项式 0x07，初值 0。"""
+    """CRC-8：多项式 0x07，初值 0，无反射。与固件 crc8Calc 一致。"""
     crc = 0
     for b in data:
         crc ^= b & 0xFF

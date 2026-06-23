@@ -160,6 +160,7 @@ def _read_states(agent: str) -> dict[str, dict]:
                     tmp = path + ".tmp"
                     with open(tmp, "w") as f:
                         json.dump({"state": "idle", "ts": ts}, f)
+                        f.flush()
                     os.replace(tmp, path)
                 except OSError:
                     pass
@@ -337,80 +338,6 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
     return proto.build_set_multi(
         proto.CH_OFF, proto.CH_OFF, proto.CH_SOLID,
         duty_r=dr, blink_period=bp, breath_period=brp,
-    )
-
-
-def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
-    """Build a mixed-mode frame from two aggregate agent states."""
-    bp = cfg.get("blink_period_ms", 800)
-    brp = cfg.get("breath_period_ms", 3000)
-    dg = cfg.get("duty_g", 255)
-    dy = cfg.get("duty_y", 255)
-    dr = cfg.get("duty_r", 255)
-
-    # state -> (channel, mode, duty)
-    def _channel_map(state: str):
-        if state in ("alert",):
-            return "red", proto.CH_BLINK, dr
-        if state in ("idle",):
-            return "red", proto.CH_SOLID, dr
-        if state in ("thinking",):
-            return "yellow", proto.CH_BREATH, dy
-        if state in ("model",):
-            return "green", proto.CH_BREATH, dg
-        if state in ("working",):
-            return "green", proto.CH_SOLID, dg
-        if state in ("stale",):
-            return "green", proto.CH_BREATH, dg
-        return "off", proto.CH_OFF, 0
-
-    modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
-    dutys = [0, 0, 0]
-    ch_idx = {"green": 0, "yellow": 1, "red": 2}
-
-    # 判断是否有活跃状态（非 idle、非 off）
-    has_active = any(s not in ("idle", "off") for s in (claude_state, codex_state))
-
-    # 任何时刻只亮一盏灯：alert 优先，其次非红灯最高优先级，最后 idle
-    best_alert = None
-    best_alert_p = 99
-    best_non_red = None
-    best_non_red_p = 99
-    best_idle = None
-
-    for state in (claude_state, codex_state):
-        # 有活跃 session 时，idle 不参与
-        if state == "idle" and has_active:
-            continue
-        ch, mode, duty = _channel_map(state)
-        if ch == "off":
-            continue
-        p = PRIORITY.get(state, 4.5 if state == "stale" else 99)
-        if state == "alert":
-            if p < best_alert_p:
-                best_alert = (ch, mode, duty)
-                best_alert_p = p
-        elif ch == "red":
-            best_idle = (ch, mode, duty)
-        elif p < best_non_red_p:
-            best_non_red = (ch, mode, duty)
-            best_non_red_p = p
-
-    # 只选一盏灯：alert > 非红灯 > idle > 兜底红灯
-    winner = best_alert or best_non_red or best_idle
-    if winner is None:
-        modes[2] = proto.CH_SOLID
-        dutys[2] = dr
-    else:
-        ch, mode, duty = winner
-        idx = ch_idx[ch]
-        modes[idx] = mode
-        dutys[idx] = duty
-
-    return proto.build_set_multi(
-        modes[0], modes[1], modes[2],
-        duty_g=dutys[0], duty_y=dutys[1], duty_r=dutys[2],
-        blink_period=bp, breath_period=brp,
     )
 
 
@@ -667,6 +594,12 @@ def main() -> None:
     def _on_exit():
         log.info("Daemon stopped, PID=%d", os.getpid())
         _write_conn_status(False, "stopped")
+        # 先关闭锁文件描述符，再删除文件
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
         for f in (PID_FILE, LOCK_FILE):
             try:
                 os.remove(f)

@@ -7,7 +7,6 @@ import pytest
 from vibecodinglight import protocol as proto
 from vibecodinglight.daemon import (
     _pick_highest,
-    _mixed_frame,
     _state_to_frame,
     _frame_for_states,
     _has_non_idle_activity,
@@ -123,17 +122,25 @@ class TestDaemon:
 
     def test_mixed_frame_non_red_channels_are_mutually_exclusive(self):
         cfg = load_config()
-        f = _mixed_frame("thinking", "working", cfg)
+        now = time.time()
+        f, _, _ = _frame_for_states("mixed",
+            {"claude-t": {"state": "thinking", "ts": now}},
+            {"codex-w": {"state": "working", "ts": now}},
+            cfg)
         parsed = proto.parse_frame(f)
         assert parsed is not None
-        # thinking → yellow breath, working → green solid
-        assert parsed[3] == proto.CH_OFF
-        assert parsed[4] == proto.CH_BREATH  # yellow (thinking)
-        assert parsed[5] == proto.CH_OFF  # red
+        # thinking → yellow breath, working → green solid; only one light
+        assert parsed[4] == proto.CH_BREATH  # yellow (thinking wins, higher priority)
+        assert parsed[3] == proto.CH_OFF      # green off
+        assert parsed[5] == proto.CH_OFF      # red off
 
     def test_mixed_frame_same_channel(self):
         cfg = load_config()
-        f = _mixed_frame("working", "model", cfg)
+        now = time.time()
+        f, _, _ = _frame_for_states("mixed",
+            {"claude-w": {"state": "working", "ts": now - 1}},
+            {"codex-m": {"state": "model", "ts": now}},
+            cfg)
         parsed = proto.parse_frame(f)
         assert parsed is not None
         # Both map to green; model has higher priority
@@ -141,10 +148,14 @@ class TestDaemon:
 
     def test_mixed_frame_red_conflict(self):
         cfg = load_config()
-        f = _mixed_frame("idle", "alert", cfg)
+        now = time.time()
+        f, _, _ = _frame_for_states("mixed",
+            {"claude-i": {"state": "idle", "ts": now - 1}},
+            {"codex-a": {"state": "alert", "ts": now}},
+            cfg)
         parsed = proto.parse_frame(f)
         assert parsed is not None
-        # Both map to red; alert has higher priority
+        # alert has higher priority than idle; alert → red blink
         assert parsed[5] == proto.CH_BLINK  # red (alert wins)
 
     def test_frame_for_states_mixed_uses_priority_for_non_red_agents(self):

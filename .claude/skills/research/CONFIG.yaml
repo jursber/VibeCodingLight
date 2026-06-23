@@ -1,0 +1,258 @@
+# Research Skill Configuration (Claude Code 适配版)
+version: 3.2.0-cc
+last_updated: "2026-06-23"
+
+# ============================================
+# 工作目录(唯一定义源,其他文件用 {{BASE_PATH}} 引用)
+# ============================================
+workspace:
+  base_path: "E:\\Moros\\MainAgent_TempTasks"
+  project_naming:
+    pattern: "{topic}_研究_{date}"
+    date_format: "YYYYMMDD"
+    sanitize: "保留中文/字母/数字/下划线,最长 50 字符"
+  subdirs:
+    - "01-plan"        # 研究计划
+    - "02-agents"      # 子 Agent 输出
+    - "03-integrated"  # 中间整合
+    - "04-final"       # 最终报告
+    - "05-archive"     # 归档
+
+# ============================================
+# 搜索模式
+# ============================================
+search_modes:
+  minimal:
+    agents: 3
+    min_search_per_agent: 5
+    timeout_seconds: 600
+    min_report_words: 8000
+  enhanced:
+    agents: 6
+    min_search_per_agent: 10
+    timeout_seconds: 900
+    min_report_words: 15000
+  extreme:
+    agents_min: 8
+    agents_max: 12
+    min_search_per_agent: 20
+    timeout_seconds: 1800
+    min_report_words: 20000
+    max_report_words: 30000
+
+# ============================================
+# 图表分析风格(唯一定义源)
+# ============================================
+chart_analysis_style:
+  description: "客观、理性、数据驱动"
+  template: "{数据含义 30 字} + {趋势洞察 30 字} + {实操启示 30 字}"
+  min_words: 80
+  max_words: 150
+  prohibited:
+    - "简单重复图表数据"
+    - "使用'从感性看''从理性看''情绪上是''感觉是'等主观抒情表述"
+
+# ============================================
+# 报告风格(图文并茂硬指标,唯一定义源)
+# ============================================
+report_style:
+  charts_and_tables:
+    mermaid:
+      total_min_extreme: 12
+      total_min_enhanced: 8
+      total_min_minimal: 5
+      types_required: 3
+      recommended_types:
+        - flowchart
+        - timeline
+        - mindmap
+        - pie
+        - graph
+        - gantt
+      prohibited_types:
+        - quadrantChart  # 中文环境兼容性差
+    tables:
+      total_min_extreme: 8
+      total_min_enhanced: 5
+      total_min_minimal: 3
+      max_rows: 10
+  chapter_structure:
+    opening: { min_words: 100, max_words: 200 }
+    summary: { min_words: 150, max_words: 250, heading: "本章节小结" }
+  narrative:
+    paragraph_ratio: 0.55
+    chart_table_ratio: 0.35
+    bullet_list_ratio: 0.10
+    max_paragraph_words: 300
+    avoid_continuous_text: true
+  prohibitions:
+    - "连续 3 个以上纯文字段落"
+    - "图表无分析文字"
+    - "分析文字简单重复图表数据"
+    - "章节无导语或小结"
+    - "纯文字堆砌"
+    - "表格 > 10 行"
+    - "使用 quadrantChart"
+
+# ============================================
+# 子代理映射(CC Task 工具)
+# ============================================
+subagents:
+  researcher:
+    cc_subagent_type: "research-researcher"
+    model: "inherit"
+    role_pool:
+      - { id: 1, name: "市场测算师", responsibility: "市场规模与增长", keywords: ["规模", "增长率", "TAM", "SAM"] }
+      - { id: 2, name: "竞争情报员", responsibility: "竞争格局与份额", keywords: ["玩家", "份额", "对标"] }
+      - { id: 3, name: "技术前瞻官", responsibility: "技术趋势与路线", keywords: ["技术", "创新", "路线图"] }
+      - { id: 4, name: "政策观察家", responsibility: "政策与监管", keywords: ["政策", "法规", "合规"] }
+      - { id: 5, name: "投资评估师", responsibility: "投融资与估值", keywords: ["融资", "估值", "退出"] }
+      - { id: 6, name: "风险预警官", responsibility: "风险与应对", keywords: ["风险", "挑战", "对策"] }
+      - { id: 7, name: "数据分析师", responsibility: "数据验证与统计", keywords: ["数据", "统计", "验证"] }
+      - { id: 8, name: "附录编纂者", responsibility: "附录与模板", keywords: ["附录", "工具", "清单"] }
+    role_selection:
+      minimal: [1, 2, 3]
+      enhanced: [1, 2, 3, 4, 5, 6]
+      extreme: [1, 2, 3, 4, 5, 6, 7, 8]
+    dynamic_expansion:
+      - if_topic_contains: ["数字化", "AI", "算法", "智能化"]
+        add: { id: 9, name: "数字化专家", responsibility: "数字化与算法分析" }
+      - if_topic_contains: ["供应链", "产业链"]
+        add: { id: 10, name: "供应链分析师", responsibility: "供应链与产业链分析" }
+      - if_topic_contains: ["国际", "出海", "跨境"]
+        add: { id: 11, name: "国际市场研究员", responsibility: "国际市场分析" }
+      - if_topic_contains: ["消费者", "用户", "客户"]
+        add: { id: 12, name: "用户研究员", responsibility: "用户洞察分析" }
+    output_limits:
+      total_max_words: 3000
+      core_findings_max: 500
+      detail_min: 1500
+      detail_max: 2000
+      mermaid_per_agent: { min: 2, max: 4 }
+      tables_per_agent: { min: 1, max: 2 }
+
+  optimizer:
+    cc_subagent_type: "research-optimizer"
+    model: "inherit"
+    timeout_seconds: 1200
+    phases:
+      phase_1: { name: "摘要扫描与结构规划", timeout: 180, output: "03-integrated/structure_plan.md" }
+      phase_2: { name: "核心章节整合", timeout: 600, output: "03-integrated/core_chapters.md" }
+      phase_3: { name: "完整整合与润色", timeout: 420, output: "04-final/{topic}研究报告.md" }
+    output_hard_limits:
+      min_words_extreme: 20000
+      max_words_extreme: 30000
+      min_mermaid: 12
+      min_tables: 8
+      min_chart_types: 3
+
+  reviewer:
+    cc_subagent_type: "research-reviewer"
+    model: "inherit"
+    timeout_seconds: 300
+    scoring_dimensions:
+      - { name: "内容完整性", weight: 15 }
+      - { name: "数据准确性", weight: 20 }
+      - { name: "逻辑清晰度", weight: 15 }
+      - { name: "图表质量", weight: 15 }
+      - { name: "来源可信度", weight: 10 }
+      - { name: "分析深度", weight: 10 }
+      - { name: "实用性", weight: 10 }
+      - { name: "专业规范性", weight: 5 }
+    decision_thresholds:
+      pass: 90
+      human_review: 85
+      retry: 75
+      reject_below: 75
+    max_retry: 1
+
+# ============================================
+# 报告模板(按主题类型选择)
+# ============================================
+report_templates:
+  default:
+    chapters: ["执行摘要", "行业现状", "技术分析", "竞争格局", "投融资动态", "政策与监管", "风险评估", "结论与建议"]
+  investment:
+    chapters: ["执行摘要", "标的概况", "市场分析", "财务分析", "风险评估", "投资建议"]
+  policy:
+    chapters: ["执行摘要", "政策背景", "核心条款", "影响分析", "合规建议"]
+  technical:
+    chapters: ["执行摘要", "技术现状", "路线对比", "应用场景", "发展建议"]
+
+# ============================================
+# 领域工具(可选,给 researcher 注入领域特定工具说明)
+# ============================================
+domain_tools: []
+  # 示例:
+  # - name: "price_data_query"
+  #   description: "查询电价数据"
+  #   usage: "在分析电价相关主题时调用"
+  # - name: "gridpilot_sim"
+  #   description: "储能仿真"
+  #   usage: "在分析储能投资时调用"
+
+# ============================================
+# 审核配置(支持按报告类型调整)
+# ============================================
+review_profiles:
+  default:
+    内容完整性: 15
+    数据准确性: 20
+    逻辑清晰度: 15
+    图表质量: 15
+    来源可信度: 10
+    分析深度: 10
+    实用性: 10
+    专业规范性: 5
+  academic:
+    内容完整性: 10
+    数据准确性: 15
+    逻辑清晰度: 15
+    图表质量: 10
+    来源可信度: 25
+    分析深度: 15
+    实用性: 5
+    专业规范性: 5
+  business:
+    内容完整性: 10
+    数据准确性: 25
+    逻辑清晰度: 10
+    图表质量: 10
+    来源可信度: 10
+    分析深度: 10
+    实用性: 20
+    专业规范性: 5
+
+# ============================================
+# 补偿机制
+# ============================================
+compensation:
+  enabled: true
+  triggers:
+    - "optimizer 总超时(>1200s)"
+    - "optimizer 输出 < 10KB"
+    - "optimizer Phase 2 超时(>600s)"
+    - "researcher 失败数 > 2"
+  procedure:
+    - { step: 1, action: "读取每个 Agent 核心发现(500 字/Agent)", budget: "8K tokens" }
+    - { step: 2, action: "规划 8-12 章结构" }
+    - { step: 3, action: "按章读取详细内容", budget: "50K tokens" }
+    - { step: 4, action: "叙事整合(图文并茂)", budget: "30K tokens" }
+    - { step: 5, action: "输出简化报告(≥15000 字)" }
+  output_path: "{BASE_PATH}/{PROJECT}/04-final/研究报告_主控整合版.md"
+  review_note: "补偿版报告仍送审,但放宽数据准确性权重"
+
+# ============================================
+# 清理与归档
+# ============================================
+cleanup:
+  enabled: true
+  delay_seconds: 30
+  keep_permanent:
+    - "01-plan/research_plan.md"
+    - "04-final/*.md"
+  archive_to: "05-archive/"
+  archive_files:
+    - "02-agents/*.md"
+    - "03-integrated/*.md"
+  keep_duration_days: 7

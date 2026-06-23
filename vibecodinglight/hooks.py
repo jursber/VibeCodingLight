@@ -21,19 +21,36 @@ from typing import Any
 if sys.platform == "win32":
     import msvcrt
 
+    _LOCK_MAX_RETRIES = 50
+    _LOCK_RETRY_INTERVAL = 0.02  # 20ms
+
     @contextlib.contextmanager
     def _file_lock(path: str):
-        """Windows 文件锁，保护 read-modify-write 操作。"""
+        """Windows 文件锁，保护 read-modify-write 操作。
+
+        使用 LK_NBLCK（非阻塞）+ 有限次重试，避免 LK_LOCK 无超时阻塞。
+        锁获取失败时抛出 OSError，不进入临界区。
+        """
         lock_path = path + ".lock"
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        acquired = False
         try:
-            msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)
+            for _ in range(_LOCK_MAX_RETRIES):
+                try:
+                    msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(_LOCK_RETRY_INTERVAL)
+            if not acquired:
+                raise OSError(f"Failed to acquire lock: {lock_path}")
             yield
         finally:
-            try:
-                msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
+            if acquired:
+                try:
+                    msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
             os.close(lock_fd)
 else:
     @contextlib.contextmanager
@@ -163,23 +180,21 @@ def _clear_other_active_records(agent: str, current_session_id: str, now: float)
     for name in names:
         if name == current_session_id or not is_state_file(name):
             continue
-        path = os.path.join(d, name)
-        with _file_lock(path):
-            data = _read_current_state(agent, name)
-            if not data:
-                continue
-            if not (data.get("active_tools") or data.get("active_subagents") or data.get("alerts")):
-                continue
-            data["state"] = "idle"
-            data["ts"] = now
-            data["main_state"] = "idle"
-            data["main_ts"] = now
-            data["active_tools"] = {}
-            data["active_subagents"] = {}
-            data["alerts"] = {}
-            data["updated_by"] = "UserPromptSubmitCleanup"
-            _append_recent_event(data, "UserPromptSubmitCleanup", "idle", {}, now)
-            _write_state_record(agent, name, data)
+        data = _read_current_state(agent, name)
+        if not data:
+            continue
+        if not (data.get("active_tools") or data.get("active_subagents") or data.get("alerts")):
+            continue
+        data["state"] = "idle"
+        data["ts"] = now
+        data["main_state"] = "idle"
+        data["main_ts"] = now
+        data["active_tools"] = {}
+        data["active_subagents"] = {}
+        data["alerts"] = {}
+        data["updated_by"] = "UserPromptSubmitCleanup"
+        _append_recent_event(data, "UserPromptSubmitCleanup", "idle", {}, now)
+        _write_state_record(agent, name, data)
 
 
 def _delete_state(agent: str, session_id: str) -> None:
