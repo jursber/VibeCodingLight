@@ -323,8 +323,8 @@ def _state_to_frame(state: str, cfg: dict) -> bytes:
 
     if state == "stale":
         return proto.build_set_multi(
-            proto.CH_BLINK, proto.CH_OFF, proto.CH_OFF,
-            duty_g=dg, blink_period=max(bp, 1200), breath_period=brp,
+            proto.CH_BREATH, proto.CH_OFF, proto.CH_OFF,
+            duty_g=dg, blink_period=bp, breath_period=brp,
         )
 
     return proto.build_set_multi(
@@ -354,7 +354,7 @@ def _mixed_frame(claude_state: str, codex_state: str, cfg: dict) -> bytes:
         if state in ("working",):
             return "green", proto.CH_SOLID, dg
         if state in ("stale",):
-            return "green", proto.CH_BLINK, dg
+            return "green", proto.CH_BREATH, dg
         return "off", proto.CH_OFF, 0
 
     modes = [proto.CH_OFF, proto.CH_OFF, proto.CH_OFF]
@@ -439,7 +439,7 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
         if state == "working":
             return "green", proto.CH_SOLID, dg
         if state == "stale":
-            return "green", proto.CH_BLINK, dg
+            return "green", proto.CH_BREATH, dg
         return None
 
     all_entries = list(claude_states.values()) + list(codex_states.values())
