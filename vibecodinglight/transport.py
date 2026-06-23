@@ -194,17 +194,17 @@ class BleLink:
                         try:
                             await client.write_gatt_char(self._char_uuid, cmd.payload, response=False)
                             self._ack(cmd, True)
-                        except Exception as ex1:
+                        except (OSError, asyncio.TimeoutError) as ex1:
                             try:
                                 await client.write_gatt_char(self._char_uuid, cmd.payload, response=True)
                                 self._ack(cmd, True)
-                            except Exception as ex2:
+                            except (OSError, asyncio.TimeoutError) as ex2:
                                 self._last_error = f"BLE 写入失败: {ex2}"
                                 self._ack(cmd, False)
                                 break
             except asyncio.CancelledError:
                 raise
-            except Exception as ex:
+            except (OSError, asyncio.TimeoutError, EOFError) as ex:
                 self._last_error = str(ex) or repr(ex)
                 log.warning("BLE 会话异常: %s", ex)
             finally:

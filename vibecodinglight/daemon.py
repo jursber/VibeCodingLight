@@ -24,8 +24,8 @@ from logging.handlers import RotatingFileHandler
 from .config import (
     ACTIVE_STATES, CONN_STATUS_FILE, IDLE_ACK_FILE, LOCK_FILE, LOG_FILE,
     LOG_MAX_BYTES, LOG_BACKUP_COUNT,
-    PID_FILE, PRIORITY, STATES_ROOT, state_dir_for, load_config,
-    detect_port,
+    PID_FILE, PRIORITY, STATES_ROOT, atomic_write_json, is_state_file,
+    state_dir_for, load_config, detect_port,
 )
 from .proc import pid_alive
 from . import protocol as proto
@@ -51,10 +51,10 @@ STATE_FILE_TTL = 1800         # 30 minutes
 MIN_ACTIVE_HOLD_S = 0.5
 INACTIVITY_TIMEOUT_S = 1800
 ALERT_STALE_S = 5.0
-ACTIVE_STATE_STALE_S = 30     # Active state file mtime staleness threshold.
+ACTIVE_STATE_STALE_S = 120    # Active state file mtime staleness threshold.
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
 CONN_STATUS_TTL = 6.0
-DERIVED_ACTIVE_STALE_S = 45.0
+DERIVED_ACTIVE_STALE_S = 120.0
 ACTIVE_TOOL_EXPIRE_S = 300.0
 
 
@@ -63,16 +63,8 @@ def _write_conn_status(connected: bool, transport: str = "", port: str = "") -> 
     data = {"connected": connected, "transport": transport, "ts": time.time()}
     if port:
         data["port"] = port
-    tmp = CONN_STATUS_FILE + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
-        os.replace(tmp, CONN_STATUS_FILE)
+        atomic_write_json(CONN_STATUS_FILE, data)
     except OSError:
         pass
 
@@ -109,7 +101,7 @@ def _read_states(agent: str) -> dict[str, dict]:
             if now - ts < 10:
                 newer = False
                 for name in files:
-                    if name.endswith(".tmp") or name.startswith("_"):
+                    if not is_state_file(name):
                         continue
                     try:
                         if os.path.getmtime(os.path.join(d, name)) > ts:
@@ -124,7 +116,7 @@ def _read_states(agent: str) -> dict[str, dict]:
                         pass
                 else:
                     for name in files:
-                        if name.endswith(".tmp") or name.startswith("_"):
+                        if not is_state_file(name):
                             continue
                         try:
                             os.remove(os.path.join(d, name))
@@ -140,7 +132,7 @@ def _read_states(agent: str) -> dict[str, dict]:
             pass
 
     for name in files:
-        if name.endswith(".tmp") or name.startswith("_"):
+        if not is_state_file(name):
             continue
         path = os.path.join(d, name)
         try:
@@ -666,6 +658,11 @@ def main() -> None:
     def _on_exit():
         log.info("Daemon stopped, PID=%d", os.getpid())
         _write_conn_status(False, "stopped")
+        for f in (PID_FILE, LOCK_FILE):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
     atexit.register(_on_exit)
 
@@ -680,7 +677,7 @@ def main() -> None:
                 d = state_dir_for(agent)
                 try:
                     for name in os.listdir(d):
-                        if name.endswith(".tmp") or name.startswith("_"):
+                        if not is_state_file(name):
                             continue
                         path = os.path.join(d, name)
                         try:
@@ -698,7 +695,7 @@ def main() -> None:
                 except OSError:
                     pass
         except Exception:
-            pass
+            log.exception("Signal handler cleanup failed")
         _write_conn_status(False, "stopped")
         sys.exit(0)
 

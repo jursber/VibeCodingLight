@@ -282,9 +282,9 @@ class TestDaemon:
         now = time.time()
         record = {
             "state": "model",
-            "ts": now - 60,
+            "ts": now - 130,
             "active_tools": {
-                "tool-a": {"state": "model", "ts": now - 60, "tool_name": "Bash"},
+                "tool-a": {"state": "model", "ts": now - 130, "tool_name": "Bash"},
             },
         }
 

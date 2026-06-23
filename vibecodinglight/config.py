@@ -120,15 +120,25 @@ def load_config() -> dict[str, Any]:
 def save_config(cfg: dict) -> None:
     """原子写入配置文件。"""
     _ensure_dir(_APP_DIR)
-    tmp = CONFIG_PATH + ".tmp"
+    atomic_write_json(CONFIG_PATH, cfg, indent=2)
+
+
+def atomic_write_json(path: str, data: Any, indent: int | None = None) -> None:
+    """原子写入 JSON 文件：先写 .tmp 再 os.replace。"""
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, ensure_ascii=False, indent=indent)
         f.flush()
         try:
             os.fsync(f.fileno())
         except OSError:
             pass
-    os.replace(tmp, CONFIG_PATH)
+    os.replace(tmp, path)
+
+
+def is_state_file(name: str) -> bool:
+    """判断文件名是否为有效的状态文件（排除 .tmp 和 _ 前缀）。"""
+    return not name.endswith(".tmp") and not name.startswith("_")
 
 
 def state_dir_for(agent: str) -> str:

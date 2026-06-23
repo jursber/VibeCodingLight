@@ -8,6 +8,7 @@ Hook 脚本 — 被 IDE hook 调用，写入状态文件或启动 daemon。
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -16,7 +17,31 @@ import time
 import threading
 from typing import Any
 
-from .config import IDLE_ACK_FILE, LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, PRIORITY, STATES_ROOT, state_dir_for
+# 平台相关的文件锁
+if sys.platform == "win32":
+    import msvcrt
+
+    @contextlib.contextmanager
+    def _file_lock(path: str):
+        """Windows 文件锁，保护 read-modify-write 操作。"""
+        lock_path = path + ".lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            msvcrt.locking(lock_fd, msvcrt.LK_LOCK, 1)
+            yield
+        finally:
+            try:
+                msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            os.close(lock_fd)
+else:
+    @contextlib.contextmanager
+    def _file_lock(path: str):
+        """非 Windows 平台的空实现。"""
+        yield
+
+from .config import IDLE_ACK_FILE, LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, PRIORITY, STATES_ROOT, atomic_write_json, is_state_file, state_dir_for
 
 # Logging (shared with daemon via same file)
 _log_handler = None
@@ -54,6 +79,20 @@ SELF_COMMAND_MARKERS = (
     "vibectl ",
 )
 
+# Windows 文件名非法字符
+_WIN_ILLEGAL_CHARS = set(':*?"<>|')
+
+
+def _validate_session_id(sid: str) -> bool:
+    """校验 session_id 是否安全可用作文件名。"""
+    if not sid or len(sid) > 128:
+        return False
+    if os.sep in sid or "/" in sid or "\0" in sid:
+        return False
+    if _WIN_ILLEGAL_CHARS & set(sid):
+        return False
+    return True
+
 
 def _read_stdin_json() -> dict[str, Any]:
     """从 stdin 读取 JSON，带超时防止 hook 进程挂住。"""
@@ -65,7 +104,7 @@ def _read_stdin_json() -> dict[str, Any]:
         try:
             if sys.stdin is None:
                 return
-            data = sys.stdin.read()
+            data = sys.stdin.read(102400)  # 限制 100KB
             if data and data.strip():
                 result = json.loads(data.strip())
         except (json.JSONDecodeError, OSError):
@@ -81,38 +120,10 @@ def _read_stdin_json() -> dict[str, Any]:
     return result
 
 
-def _write_state(agent: str, session_id: str, state: str,
-                 is_subagent: bool = False) -> None:
-    """原子写入状态文件。"""
-    d = state_dir_for(agent)
-    path = os.path.join(d, session_id)
-    data = {"state": state, "ts": time.time()}
-    if is_subagent:
-        data["is_subagent"] = True
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp, path)
-
-
 def _write_state_record(agent: str, session_id: str, data: dict[str, Any]) -> None:
     """原子写入完整状态账本。"""
-    d = state_dir_for(agent)
-    path = os.path.join(d, session_id)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    os.replace(tmp, path)
+    path = os.path.join(state_dir_for(agent), session_id)
+    atomic_write_json(path, data)
 
 
 def _ack_idle(now: float) -> None:
@@ -150,23 +161,25 @@ def _clear_other_active_records(agent: str, current_session_id: str, now: float)
         return
 
     for name in names:
-        if name == current_session_id or name.endswith(".tmp") or name.startswith("_"):
+        if name == current_session_id or not is_state_file(name):
             continue
-        data = _read_current_state(agent, name)
-        if not data:
-            continue
-        if not (data.get("active_tools") or data.get("active_subagents") or data.get("alerts")):
-            continue
-        data["state"] = "idle"
-        data["ts"] = now
-        data["main_state"] = "idle"
-        data["main_ts"] = now
-        data["active_tools"] = {}
-        data["active_subagents"] = {}
-        data["alerts"] = {}
-        data["updated_by"] = "UserPromptSubmitCleanup"
-        _append_recent_event(data, "UserPromptSubmitCleanup", "idle", {}, now)
-        _write_state_record(agent, name, data)
+        path = os.path.join(d, name)
+        with _file_lock(path):
+            data = _read_current_state(agent, name)
+            if not data:
+                continue
+            if not (data.get("active_tools") or data.get("active_subagents") or data.get("alerts")):
+                continue
+            data["state"] = "idle"
+            data["ts"] = now
+            data["main_state"] = "idle"
+            data["main_ts"] = now
+            data["active_tools"] = {}
+            data["active_subagents"] = {}
+            data["alerts"] = {}
+            data["updated_by"] = "UserPromptSubmitCleanup"
+            _append_recent_event(data, "UserPromptSubmitCleanup", "idle", {}, now)
+            _write_state_record(agent, name, data)
 
 
 def _delete_state(agent: str, session_id: str) -> None:
@@ -289,84 +302,88 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
         detail = f"sub={sub_short} {detail}".strip()
     log.info("hook agent=%s session=%s event=%s state=%s %s",
              agent, sid_short, event, state, detail)
-    record = _normalize_record(_read_current_state(agent, session_id), state, now)
 
-    if (
-        event in TOOL_END_EVENTS or event in SUBAGENT_END_EVENTS
-    ) and record.get("updated_by") in ("Stop", "SessionEnd"):
-        _append_recent_event(record, event, str(record.get("state") or "idle"), stdin_data, now)
-        _write_state_record(agent, session_id, record)
-        return
+    # 加锁保护 read-modify-write 周期
+    state_path = os.path.join(state_dir_for(agent), session_id)
+    with _file_lock(state_path):
+        record = _normalize_record(_read_current_state(agent, session_id), state, now)
 
-    if event in TURN_BOUNDARY_EVENTS:
-        record["active_tools"] = {}
-        record["active_subagents"] = {}
+        if (
+            event in TOOL_END_EVENTS or event in SUBAGENT_END_EVENTS
+        ) and record.get("updated_by") in ("Stop", "SessionEnd"):
+            _append_recent_event(record, event, str(record.get("state") or "idle"), stdin_data, now)
+            _write_state_record(agent, session_id, record)
+            return
 
-    if event in ALERT_CLEAR_EVENTS:
-        record["alerts"] = {}
+        if event in TURN_BOUNDARY_EVENTS:
+            record["active_tools"] = {}
+            record["active_subagents"] = {}
 
-    if event == "UserPromptSubmit":
-        _ack_idle(now)
-        _clear_other_active_records(agent, session_id, now)
+        if event in ALERT_CLEAR_EVENTS:
+            record["alerts"] = {}
 
-    if event in TOOL_START_EVENTS:
-        tool_id, has_stable_id = _tool_event_id(stdin_data)
-        existing = record["active_tools"].get(tool_id, {})
-        count = int(existing.get("count", 0)) + 1 if not has_stable_id else 1
-        record["active_tools"][tool_id] = {
-            "state": "model",
-            "ts": now,
-            "tool_name": stdin_data.get("tool_name", ""),
-            "count": count,
-            "stable_id": has_stable_id,
-        }
-    elif event in TOOL_END_EVENTS:
-        tool_id, has_stable_id = _tool_event_id(stdin_data)
-        existing = record["active_tools"].get(tool_id)
-        if existing and not has_stable_id:
-            count = max(0, int(existing.get("count", 1)) - 1)
-            if count:
-                existing["count"] = count
-                existing["ts"] = now
-                record["active_tools"][tool_id] = existing
+        if event == "UserPromptSubmit":
+            _ack_idle(now)
+            _clear_other_active_records(agent, session_id, now)
+
+        if event in TOOL_START_EVENTS:
+            tool_id, has_stable_id = _tool_event_id(stdin_data)
+            existing = record["active_tools"].get(tool_id, {})
+            count = int(existing.get("count", 0)) + 1 if not has_stable_id else 1
+            record["active_tools"][tool_id] = {
+                "state": "model",
+                "ts": now,
+                "tool_name": stdin_data.get("tool_name", ""),
+                "count": count,
+                "stable_id": has_stable_id,
+            }
+        elif event in TOOL_END_EVENTS:
+            tool_id, has_stable_id = _tool_event_id(stdin_data)
+            existing = record["active_tools"].get(tool_id)
+            if existing and not has_stable_id:
+                count = max(0, int(existing.get("count", 1)) - 1)
+                if count:
+                    existing["count"] = count
+                    existing["ts"] = now
+                    record["active_tools"][tool_id] = existing
+                else:
+                    record["active_tools"].pop(tool_id, None)
             else:
                 record["active_tools"].pop(tool_id, None)
-        else:
-            record["active_tools"].pop(tool_id, None)
-        if event == "PostToolUseFailure":
-            record["alerts"]["tool_failure"] = {"state": "alert", "ts": now}
-        elif not record["active_tools"]:
-            record["main_state"] = state
-            record["main_ts"] = now
+            if event == "PostToolUseFailure":
+                record["alerts"]["tool_failure"] = {"state": "alert", "ts": now}
+            elif not record["active_tools"]:
+                record["main_state"] = state
+                record["main_ts"] = now
 
-    if event in SUBAGENT_START_EVENTS:
-        sub_id = _subagent_id(stdin_data)
-        record["active_subagents"][sub_id] = {
-            "state": state,
-            "ts": now,
-        }
-    elif event in SUBAGENT_END_EVENTS:
-        sub_id = _subagent_id(stdin_data)
-        record["active_subagents"].pop(sub_id, None)
+        if event in SUBAGENT_START_EVENTS:
+            sub_id = _subagent_id(stdin_data)
+            record["active_subagents"][sub_id] = {
+                "state": state,
+                "ts": now,
+            }
+        elif event in SUBAGENT_END_EVENTS:
+            sub_id = _subagent_id(stdin_data)
+            record["active_subagents"].pop(sub_id, None)
 
-    if state == "alert" and event not in TOOL_END_EVENTS:
-        record["alerts"][event or "alert"] = {"state": "alert", "ts": now}
+        if state == "alert" and event not in TOOL_END_EVENTS:
+            record["alerts"][event or "alert"] = {"state": "alert", "ts": now}
 
-    if (
-        event in ("UserPromptSubmit", "Stop", "PreCompact", "PostCompact")
-        or event in SUBAGENT_END_EVENTS
-        or not stdin_data.get("agent_id")
-    ):
-        if event not in TOOL_START_EVENTS and event not in TOOL_END_EVENTS:
-            record["main_state"] = state
-            record["main_ts"] = now
+        if (
+            event in ("UserPromptSubmit", "Stop", "PreCompact", "PostCompact")
+            or event in SUBAGENT_END_EVENTS
+            or not stdin_data.get("agent_id")
+        ):
+            if event not in TOOL_START_EVENTS and event not in TOOL_END_EVENTS:
+                record["main_state"] = state
+                record["main_ts"] = now
 
-    record["state"] = _effective_state(record)
-    record["ts"] = now
-    record["updated_by"] = event
-    record["is_subagent"] = bool(stdin_data.get("agent_id"))
-    _append_recent_event(record, event, record["state"], stdin_data, now)
-    _write_state_record(agent, session_id, record)
+        record["state"] = _effective_state(record)
+        record["ts"] = now
+        record["updated_by"] = event
+        record["is_subagent"] = bool(stdin_data.get("agent_id"))
+        _append_recent_event(record, event, record["state"], stdin_data, now)
+        _write_state_record(agent, session_id, record)
 
 
 def _resolve_state(event: str, state_hint: str | None,
@@ -447,15 +464,11 @@ def main_set_state() -> None:
             # 全局 off：写 _global_off 标记
             d = state_dir_for(agent)
             path = os.path.join(d, "_global_off")
-            data = json.dumps({"state": "off", "ts": time.time()})
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(data)
-            os.replace(tmp, path)
+            atomic_write_json(path, {"state": "off", "ts": time.time()})
         sys.exit(0)
 
-    # 安全校验：session_id 不能含路径分隔符
-    if os.sep in session_id or "/" in session_id:
+    # 安全校验：session_id 不能含路径分隔符或非法字符
+    if not _validate_session_id(session_id):
         sys.exit(1)
 
     if state == "off":
@@ -488,7 +501,7 @@ def main_start_daemon() -> None:
             close_fds=True,
         )
     except Exception:
-        pass
+        log.warning("Failed to start daemon: %s", vibe_cmd, exc_info=True)
 
 
 def main_set_alert() -> None:
@@ -508,7 +521,7 @@ def main_set_alert() -> None:
     session_id = (stdin_data.get("session_id") or
                   stdin_data.get("conversation_id") or "").strip()
 
-    if session_id and os.sep not in session_id and "/" not in session_id:
+    if session_id and _validate_session_id(session_id):
         _apply_event_state(agent, session_id, "PermissionRequest", "alert", stdin_data)
 
     # 输出 defer 决策
