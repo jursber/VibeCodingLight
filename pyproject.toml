@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vibecodinglight"
-version = "1.1.0"
+version = "1.2.0"
 description = "AI 编程状态灯控系统 — 将 Claude Code / Codex 状态映射到物理交通灯"
 requires-python = ">=3.10"
 dependencies = [

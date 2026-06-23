@@ -1,3 +1,3 @@
 """VibeCodingLight — AI 编程状态灯控系统"""
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
