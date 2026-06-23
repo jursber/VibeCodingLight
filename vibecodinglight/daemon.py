@@ -177,6 +177,15 @@ def _read_states(agent: str) -> dict[str, dict]:
                                      agent, name, state, now - file_mtime)
                             state = "idle"
                             ts = now
+                            # 写回文件，避免下轮重新触发软过期
+                            try:
+                                tmp = path + ".tmp"
+                                with open(tmp, "w") as f:
+                                    json.dump({"state": "idle", "ts": ts}, f)
+                                    f.flush()
+                                os.replace(tmp, path)
+                            except OSError:
+                                pass
                 except OSError:
                     pass
 

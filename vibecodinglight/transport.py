@@ -75,7 +75,7 @@ class SerialLink:
     def close(self) -> None:
         try:
             self._ser.close()
-        except Exception:
+        except (OSError, serial.SerialException):
             pass
 
 
@@ -267,7 +267,7 @@ def wait_for_serial(reconnect_interval: float, cfg: dict | None = None) -> Seria
         if port:
             try:
                 return SerialLink(open_serial(port))
-            except Exception:
+            except (OSError, serial.SerialException):
                 pass
         time.sleep(reconnect_interval)
 

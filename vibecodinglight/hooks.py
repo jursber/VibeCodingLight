@@ -304,6 +304,8 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
              agent, sid_short, event, state, detail)
 
     # 加锁保护 read-modify-write 周期
+    # 注意：_clear_other_active_records 必须在锁外执行，避免 ABBA 死锁
+    needs_clear_others = False
     state_path = os.path.join(state_dir_for(agent), session_id)
     with _file_lock(state_path):
         record = _normalize_record(_read_current_state(agent, session_id), state, now)
@@ -324,7 +326,7 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
 
         if event == "UserPromptSubmit":
             _ack_idle(now)
-            _clear_other_active_records(agent, session_id, now)
+            needs_clear_others = True
 
         if event in TOOL_START_EVENTS:
             tool_id, has_stable_id = _tool_event_id(stdin_data)
@@ -384,6 +386,10 @@ def _apply_event_state(agent: str, session_id: str, event: str, state: str,
         record["is_subagent"] = bool(stdin_data.get("agent_id"))
         _append_recent_event(record, event, record["state"], stdin_data, now)
         _write_state_record(agent, session_id, record)
+
+    # 在锁外清理其他 session，避免 ABBA 死锁
+    if needs_clear_others:
+        _clear_other_active_records(agent, session_id, now)
 
 
 def _resolve_state(event: str, state_hint: str | None,
@@ -480,7 +486,7 @@ def main_set_state() -> None:
 def main_start_daemon() -> None:
     """start-daemon 子命令入口。被 SessionStart hook 调用，确保 daemon 运行。"""
     from .proc import pid_alive
-    from .config import PID_FILE, LOCK_FILE
+    from .config import PID_FILE
 
     # 检查 PID 文件
     try:

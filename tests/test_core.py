@@ -847,3 +847,87 @@ class TestTransport:
         link = SerialLink(FakeSerial())
 
         assert link.health_check() is False
+
+
+class TestConfigUtilities:
+    def test_atomic_write_json_creates_file(self, tmp_path):
+        from vibecodinglight.config import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"key": "value"})
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert data == {"key": "value"}
+
+    def test_atomic_write_json_with_indent(self, tmp_path):
+        from vibecodinglight.config import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"a": 1}, indent=2)
+
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "\n" in content  # indented output has newlines
+
+    def test_atomic_write_json_replaces_existing(self, tmp_path):
+        from vibecodinglight.config import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"old": True})
+        atomic_write_json(path, {"new": True})
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert data == {"new": True}
+
+    def test_atomic_write_json_no_tmp残留(self, tmp_path):
+        from vibecodinglight.config import atomic_write_json
+
+        path = str(tmp_path / "test.json")
+        atomic_write_json(path, {"key": "value"})
+
+        assert not os.path.exists(path + ".tmp")
+
+    def test_is_state_file_excludes_tmp(self):
+        from vibecodinglight.config import is_state_file
+
+        assert is_state_file("session-1") is True
+        assert is_state_file("session-1.tmp") is False
+        assert is_state_file("_global_off") is False
+        assert is_state_file("_idle_ack") is False
+        assert is_state_file("abc") is True
+
+    def test_validate_session_id_valid(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        assert _validate_session_id("abc-123") is True
+        assert _validate_session_id("744e45e7-fd93") is True
+
+    def test_validate_session_id_rejects_empty(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        assert _validate_session_id("") is False
+
+    def test_validate_session_id_rejects_too_long(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        assert _validate_session_id("a" * 129) is False
+        assert _validate_session_id("a" * 128) is True
+
+    def test_validate_session_id_rejects_path_separator(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        assert _validate_session_id("../etc/passwd") is False
+        assert _validate_session_id("dir/file") is False
+
+    def test_validate_session_id_rejects_null_byte(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        assert _validate_session_id("abc\x00def") is False
+
+    def test_validate_session_id_rejects_win_illegal(self):
+        from vibecodinglight.hooks import _validate_session_id
+
+        for ch in ':*?"<>|':
+            assert _validate_session_id(f"abc{ch}def") is False
