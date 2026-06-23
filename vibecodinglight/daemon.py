@@ -50,6 +50,7 @@ ACTIVE_STATE_TTL = 300        # 5 minutes
 STATE_FILE_TTL = 1800         # 30 minutes
 MIN_ACTIVE_HOLD_S = 0.5
 INACTIVITY_TIMEOUT_S = 1800
+IDLE_STATE_TTL = 120        # 2 minutes — auto-clean idle sessions when SessionEnd is missing
 ALERT_STALE_S = 5.0
 ACTIVE_STATE_STALE_S = 120    # Active state file mtime staleness threshold.
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
@@ -192,6 +193,15 @@ def _read_states(agent: str) -> dict[str, dict]:
 
             # Remove very old state files.
             if ts > 0 and now - ts > STATE_FILE_TTL and state != "off":
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+
+            # Auto-clean idle sessions after a short TTL (SessionEnd may not fire).
+            if state == "idle" and ts > 0 and now - ts > IDLE_STATE_TTL:
+                log.info("Session %s/%s idle for %.0fs, auto-cleaning (SessionEnd missing?)", agent, name, now - ts)
                 try:
                     os.remove(path)
                 except OSError:
