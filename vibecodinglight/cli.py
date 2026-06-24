@@ -693,19 +693,23 @@ def _startup_folder() -> str:
 
 
 def _install_autostart() -> None:
-    """在 Windows 启动文件夹创建 watchdog 脚本（每 30 秒检查，挂了自动重启）。"""
-    if sys.platform != "win32":
-        _print("开机自启仅支持 Windows")
-        return
+    """安装开机自启：Windows 用 VBS watchdog，macOS 用 launchd plist，Linux 提示手动配置。"""
+    if sys.platform == "win32":
+        _install_autostart_windows()
+    elif sys.platform == "darwin":
+        _install_autostart_macos()
+    else:
+        _print("开机自启仅支持 Windows 和 macOS，Linux 请手动配置 systemd service。")
 
+
+def _install_autostart_windows() -> None:
+    """在 Windows 启动文件夹创建 watchdog 脚本（每 30 秒检查，挂了自动重启）。"""
     startup = _startup_folder()
     shortcut_path = os.path.join(startup, "VibeCodingLight.vbs")
 
-    # daemon 启动命令。复用 CLI 的 argv，避免 startup 和手动启动使用不同解释器。
     daemon_cmd = " ".join(f'"{p}"' if " " in p else p for p in _daemon_argv())
     daemon_cmd_escaped = daemon_cmd.replace('"', '""')
 
-    # Watchdog VBS：每 30 秒检查一次，daemon 挂了自动重启
     vbs = f'''Set fso = CreateObject("Scripting.FileSystemObject")
 Set WshShell = CreateObject("WScript.Shell")
 tempDir = WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\\Temp"
@@ -720,7 +724,6 @@ Function IsDaemonRunning()
     pid = Trim(f.ReadAll())
     f.Close
     If pid = "" Then Exit Function
-    ' 用 WMI 查询进程，完全无窗口
     On Error Resume Next
     Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")
     If Err.Number <> 0 Then Err.Clear: Exit Function
@@ -730,14 +733,12 @@ Function IsDaemonRunning()
     On Error GoTo 0
 End Function
 
-' 首次启动
 If Not IsDaemonRunning() Then
     If fso.FileExists(lockFile) Then fso.DeleteFile lockFile, True
     WshShell.Run "{daemon_cmd_escaped}", 0, False
     WScript.Sleep 3000
 End If
 
-' Watchdog 循环：每 30 秒检查一次
 Do
     WScript.Sleep 30000
     If Not IsDaemonRunning() Then
@@ -752,14 +753,73 @@ Loop
     _print(f"已创建开机自启 (watchdog): {shortcut_path}")
 
 
+def _install_autostart_macos() -> None:
+    """在 ~/Library/LaunchAgents/ 创建 launchd plist 实现开机自启。"""
+    launch_agents = os.path.expanduser("~/Library/LaunchAgents")
+    os.makedirs(launch_agents, exist_ok=True)
+    plist_path = os.path.join(launch_agents, "com.vibecodinglight.daemon.plist")
+
+    daemon_argv = _daemon_argv()
+    program_args = "\n".join(f"        <string>{arg}</string>" for arg in daemon_argv)
+
+    from .config import LOG_FILE
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vibecodinglight.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+{program_args}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>{LOG_FILE}</string>
+</dict>
+</plist>
+"""
+    with open(plist_path, "w", encoding="utf-8") as f:
+        f.write(plist)
+
+    import subprocess
+    # 先 unload（忽略错误），再 load
+    subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
+    result = subprocess.run(["launchctl", "load", plist_path], capture_output=True, text=True)
+    if result.returncode == 0:
+        _print(f"已安装开机自启 (launchd): {plist_path}")
+    else:
+        _print(f"已写入 plist: {plist_path}")
+        _print(f"launchctl load 失败: {result.stderr.strip()}")
+        _print("可手动运行: launchctl load " + plist_path)
+
+
 def _uninstall_autostart() -> None:
-    startup = _startup_folder()
-    shortcut_path = os.path.join(startup, "VibeCodingLight.vbs")
-    try:
-        os.remove(shortcut_path)
-        _print("已移除开机自启")
-    except OSError:
-        _print("开机自启不存在")
+    if sys.platform == "win32":
+        startup = _startup_folder()
+        shortcut_path = os.path.join(startup, "VibeCodingLight.vbs")
+        try:
+            os.remove(shortcut_path)
+            _print("已移除开机自启")
+        except OSError:
+            _print("开机自启不存在")
+    elif sys.platform == "darwin":
+        plist_path = os.path.expanduser("~/Library/LaunchAgents/com.vibecodinglight.daemon.plist")
+        import subprocess
+        subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
+        try:
+            os.remove(plist_path)
+            _print("已移除开机自启")
+        except OSError:
+            _print("开机自启不存在")
+    else:
+        _print("开机自启仅支持 Windows 和 macOS")
 
 
 def _daemon_argv() -> list[str]:

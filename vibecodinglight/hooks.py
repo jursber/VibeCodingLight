@@ -53,10 +53,22 @@ if sys.platform == "win32":
                     pass
             os.close(lock_fd)
 else:
+    import fcntl
+
     @contextlib.contextmanager
     def _file_lock(path: str):
-        """非 Windows 平台的空实现。"""
-        yield
+        """POSIX 平台文件锁（fcntl），保护 read-modify-write 操作。"""
+        lock_path = path + ".lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 from .config import IDLE_ACK_FILE, LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, PRIORITY, STATES_ROOT, atomic_write_json, is_state_file, state_dir_for
 

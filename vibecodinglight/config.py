@@ -1,21 +1,30 @@
 """
 配置管理。
 
-配置文件路径：%LOCALAPPDATA%\\VibeCodingLight\\config.json
-状态目录：%LOCALAPPDATA%\\Temp\\vibe_states\\{agent}\\{session_id}
+配置文件路径：
+  Windows: %LOCALAPPDATA%\\VibeCodingLight\\config.json
+  macOS:   ~/Library/Application Support/VibeCodingLight/config.json
+  Linux:   ~/.config/VibeCodingLight/config.json
+状态目录（临时文件目录下）：vibe_states/{agent}/{session_id}
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 # ── 硬件常量 ──────────────────────────────────────────────
 ESP32_VID = 0x303A
-DEFAULT_PORT = "COM3"
+if sys.platform == "win32":
+    DEFAULT_PORT = "COM3"
+elif sys.platform == "darwin":
+    DEFAULT_PORT = "/dev/tty.usbserial-0001"
+else:
+    DEFAULT_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 115200
 
 BLE_DEVICE_NAME = os.environ.get("VIBE_BLE_NAME", "VibeLight")
@@ -36,8 +45,22 @@ PRIORITY = {
 ACTIVE_STATES = {"alert", "thinking", "model", "working"}
 
 # ── 路径 ──────────────────────────────────────────────────
-_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "VibeCodingLight")
-_TEMP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp")
+def _get_app_dir() -> str:
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("LOCALAPPDATA", ""), "VibeCodingLight")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "VibeCodingLight")
+    return os.path.join(os.path.expanduser("~"), ".config", "VibeCodingLight")
+
+
+def _get_temp_dir() -> str:
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp")
+    return os.path.join(os.path.expanduser("~"), ".cache", "VibeCodingLight")
+
+
+_APP_DIR = _get_app_dir()
+_TEMP_DIR = _get_temp_dir()
 
 CONFIG_PATH = os.path.join(_APP_DIR, "config.json")
 STATES_ROOT = os.path.join(_TEMP_DIR, "vibe_states")
