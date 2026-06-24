@@ -12,7 +12,6 @@ from __future__ import annotations
 import atexit
 import json
 import logging
-import msvcrt
 import os
 import signal
 import sys
@@ -483,7 +482,12 @@ def _acquire_lock():
     try:
         os.write(fd, b"1")
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return fd
     except (IOError, OSError):
         try:
