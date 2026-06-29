@@ -437,16 +437,14 @@ def _mixed_frame_from_entries(claude_states: dict[str, dict],
             best_non_red_p = p
             best_non_red_ts = ts
 
-    # 只选一盏灯：alert > 非红灯 > idle > 兜底红灯
+    # 只选一盏灯：alert > 非红灯 > idle > 无 session 全灭
     winner = best_alert or best_non_red or best_idle
     if winner is None:
-        modes[2] = proto.CH_SOLID
-        dutys[2] = dr
-    else:
-        ch, mode, duty = winner
-        idx = ch_idx[ch]
-        modes[idx] = mode
-        dutys[idx] = duty
+        return proto.build_off()
+    ch, mode, duty = winner
+    idx = ch_idx[ch]
+    modes[idx] = mode
+    dutys[idx] = duty
 
     return proto.build_set_multi(
         modes[0], modes[1], modes[2],
