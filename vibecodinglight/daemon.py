@@ -41,8 +41,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("vibe.daemon")
 
+# 模块级变量：供退出清理函数发送 OFF 帧
+_current_link = None
+
 # Constants
 POLL_INTERVAL = 0.05          # 50ms
+KEEPALIVE_INTERVAL = 2.0       # 每 2 秒重发帧，喂固件看门狗
 RECONNECT_INTERVAL = 2
 ERROR_RETRY_INTERVAL = 1
 ACTIVE_STATE_TTL = 300        # 5 minutes
@@ -50,7 +54,7 @@ STATE_FILE_TTL = 1800         # 30 minutes
 MIN_ACTIVE_HOLD_S = 0.5
 INACTIVITY_TIMEOUT_S = 1800
 IDLE_STATE_TTL = 120        # 2 minutes — auto-clean idle sessions when SessionEnd is missing
-ALERT_STALE_S = 5.0
+ALERT_STALE_S = 2.0  # alert 残留最多 2 秒
 ACTIVE_STATE_STALE_S = 120    # Active state file mtime staleness threshold.
 ACTIVE_HOLD_STATES = {"alert", "thinking", "model", "working", "stale"}
 CONN_STATUS_TTL = 6.0
@@ -513,6 +517,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
     last_state = "off"
     last_switch = 0.0
     last_activity = time.time()
+    last_send = 0.0  # 心跳保活：上次实际发送帧的时间
 
     mode = cfg.get("mode", "claude")
 
@@ -557,8 +562,8 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Send changed frame.
-            if frame != last_frame:
+            # Send frame on change, or as keep-alive every KEEPALIVE_INTERVAL to feed firmware watchdog.
+            if frame != last_frame or (now - last_send) > KEEPALIVE_INTERVAL:
                 if not link.send_raw(frame, wait=True):
                     detail = getattr(link, "last_error", "") or "no low-level error"
                     try:
@@ -571,6 +576,7 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
                 last_frame = frame
                 last_state = best_state
                 last_switch = now
+                last_send = now
 
             time.sleep(POLL_INTERVAL)
 
@@ -583,6 +589,8 @@ def _run_once(link, cfg: dict, cfg_path: str) -> None:
 
 def main() -> None:
     """Run the daemon process."""
+    global _current_link
+
     lock_fd = _acquire_lock()
     if lock_fd is None and not _pid_file_alive():
         try:
@@ -607,6 +615,16 @@ def main() -> None:
 
     def _on_exit():
         log.info("Daemon stopped, PID=%d", os.getpid())
+        # 尝试发送 OFF 帧然后关闭连接
+        if _current_link is not None:
+            try:
+                _current_link.send_raw(proto.build_off(), wait=True, timeout=1.0)
+            except Exception:
+                pass
+            try:
+                _current_link.close()
+            except Exception:
+                pass
         _write_conn_status(False, "stopped")
         # 先关闭锁文件描述符，再删除文件
         if lock_fd is not None:
@@ -625,6 +643,16 @@ def main() -> None:
     def _signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
         log.info("Received %s, shutting down gracefully...", sig_name)
+        # 先发送 OFF 帧关闭灯光
+        if _current_link is not None:
+            try:
+                _current_link.send_raw(proto.build_off(), wait=True, timeout=1.0)
+            except Exception:
+                pass
+            try:
+                _current_link.close()
+            except Exception:
+                pass
         try:
             cfg = load_config()
             mode = cfg.get("mode", "claude")
@@ -665,6 +693,9 @@ def main() -> None:
     cfg = load_config()
     cfg_path = CONFIG_PATH
 
+    _daemon_start_ts = time.time()
+    _did_startup_cleanup = False  # 仅首次连接时清理残留
+
     while True:
         link = None
         try:
@@ -674,20 +705,36 @@ def main() -> None:
 
             from .transport import wait_for_transport, find_esp32_port
             link = wait_for_transport(transport, RECONNECT_INTERVAL, cfg)
+            _current_link = link
             configured_port = str(cfg.get("serial_port") or "auto")
             port = configured_port if configured_port.lower() != "auto" else find_esp32_port()
             _write_conn_status(True, transport, port or "")
             log.info("Hardware connected (transport=%s)", transport)
 
-            boot_frame = proto.build_set_multi(
-                proto.CH_SOLID, proto.CH_SOLID, proto.CH_SOLID,
-                duty_g=cfg.get("duty_g", 255),
-                duty_y=cfg.get("duty_y", 255),
-                duty_r=cfg.get("duty_r", 255),
-            )
-            link.send_raw(boot_frame, wait=True)
-            time.sleep(2)
+            # 仅首次连接时直接删除上次 daemon 残留的旧状态文件
+            if not _did_startup_cleanup:
+                _did_startup_cleanup = True
+                agents = ["claude", "codex"] if cfg.get("mode", "claude") == "mixed" else [cfg.get("mode", "claude")]
+                total = 0
+                for agent in agents:
+                    d = state_dir_for(agent)
+                    try:
+                        for name in os.listdir(d):
+                            if not is_state_file(name):
+                                continue
+                            path = os.path.join(d, name)
+                            try:
+                                if os.path.getmtime(path) < _daemon_start_ts:
+                                    os.remove(path)
+                                    total += 1
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
+                if total:
+                    log.info("Startup cleanup: removed %d stale state files", total)
 
+            # 固件已处理上电指示（2s 全亮后全灭），此处直接进入主循环
             _run_once(link, cfg, cfg_path)
 
         except ConnectionError:

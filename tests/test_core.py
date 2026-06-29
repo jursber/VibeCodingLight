@@ -96,11 +96,11 @@ class TestDaemon:
         assert _pick_highest(states) == "working"
 
     def test_fresh_alert_wins(self):
-        """alert 未过期时仍然优先。"""
+        """alert 未过期时仍然优先（alert 残留时间已缩短为 2s）。"""
         now = time.time()
         states = {
-            "s1": {"state": "alert", "ts": now - 2},     # 2 秒前的 alert
-            "s2": {"state": "working", "ts": now - 1},   # 1 秒前的 working
+            "s1": {"state": "alert", "ts": now - 1},     # 1 秒前的 alert
+            "s2": {"state": "working", "ts": now - 0.5}, # 0.5 秒前的 working
         }
         assert _pick_highest(states) == "alert"
 

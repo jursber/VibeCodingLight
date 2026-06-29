@@ -287,8 +287,8 @@ def cmd_setup() -> None:
         cfg["serial_port"] = "auto"
 
     # 传输方式
-    transport = input(f"传输方式 (serial/ble) [{cfg.get('transport', 'serial')}]: ").strip()
-    if transport in ("serial", "ble"):
+    transport = input(f"传输方式 (serial) [{cfg.get('transport', 'serial')}]: ").strip()
+    if transport in ("serial",):
         cfg["transport"] = transport
 
     # 亮度

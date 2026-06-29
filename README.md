@@ -114,9 +114,9 @@ firmware/vibelight/velight.ino
 ### 1. 克隆或复制项目
 
 ```powershell
-cd E:\Cursor
+cd E:\codes
 git clone https://github.com/jursber/VibeCodingLight.git
-cd E:\Cursor\VibeCodingLight
+cd E:\codes\VibeCodingLight
 ```
 
 如果您已经有本地目录，也可以直接进入项目目录。

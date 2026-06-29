@@ -27,10 +27,6 @@ else:
     DEFAULT_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 115200
 
-BLE_DEVICE_NAME = os.environ.get("VIBE_BLE_NAME", "VibeLight")
-BLE_SERVICE_UUID = "e52c12b6-7ac3-4636-9c17-3d608bcea796"
-BLE_CHAR_UUID = "e52c12b7-7ac3-4636-9c17-3d608bcea796"
-
 # ── 状态优先级（数字越小越优先）───────────────────────────
 PRIORITY = {
     "alert":    1,   # 等待用户批准/报错
@@ -99,7 +95,7 @@ def _validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         result["mode"] = defaults["mode"]
 
     # 传输方式校验
-    if result.get("transport") not in ("serial", "ble"):
+    if result.get("transport") not in ("serial",):
         result["transport"] = defaults["transport"]
 
     # 亮度校验 (0-255)
